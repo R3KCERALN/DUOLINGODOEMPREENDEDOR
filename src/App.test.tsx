@@ -19,3 +19,8 @@ test('renderiza a tela de login para visitante', () => {
   render(<MemoryRouter initialEntries={['/login']}><AuthProvider><AppRoutes /></AuthProvider></MemoryRouter>)
   expect(screen.getByRole('heading', { name: 'Entrar' })).toBeInTheDocument()
 })
+
+test('rotas da trilha exigem login', async () => {
+  render(<MemoryRouter initialEntries={['/trilha/w01']}><AuthProvider><AppRoutes /></AuthProvider></MemoryRouter>)
+  expect(await screen.findByRole('heading', { name: 'Entrar' })).toBeInTheDocument()
+})
