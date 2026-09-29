@@ -1,5 +1,5 @@
 begin;
-select plan(8);
+select plan(10);
 
 insert into auth.users (id, email) values
   ('00000000-0000-0000-0000-00000000000a', 'aluna@test'),
@@ -38,6 +38,11 @@ select is((select total_official from public.v_simulation_official), 24.0::numer
 -- aluna depois da revelação
 set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-00000000000a","role":"authenticated"}';
 select is((select count(*)::int from public.simulation_scenarios), 1, 'aluna vê cenário após revelação');
+
+-- conta autenticada sem perfil não lê nada
+select ok((select count(*)::int from public.books) > 0, 'aluna com perfil lê livros');
+set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-00000000000c","role":"authenticated"}';
+select is((select count(*)::int from public.books), 0, 'usuário sem perfil não lê nada');
 
 select * from finish();
 rollback;
