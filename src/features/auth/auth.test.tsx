@@ -2,16 +2,20 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Routes, Route } from 'react-router'
 
-const { signInWithOtp } = vi.hoisted(() => ({ signInWithOtp: vi.fn().mockResolvedValue({ error: null }) }))
+const { signInWithOtp, getSession, from } = vi.hoisted(() => ({
+  signInWithOtp: vi.fn().mockResolvedValue({ error: null }),
+  getSession: vi.fn().mockResolvedValue({ data: { session: null } }),
+  from: vi.fn(),
+}))
 vi.mock('@/lib/supabase', () => ({
   supabase: {
     auth: {
       signInWithOtp,
-      getSession: vi.fn().mockResolvedValue({ data: { session: null } }),
+      getSession,
       onAuthStateChange: vi.fn(() => ({ data: { subscription: { unsubscribe: vi.fn() } } })),
       signOut: vi.fn(),
     },
-    from: vi.fn(),
+    from,
   },
 }))
 
@@ -42,4 +46,22 @@ test('rota protegida manda visitante para /login', async () => {
     </MemoryRouter>,
   )
   expect(await screen.findByText('tela de login')).toBeInTheDocument()
+})
+
+test('sessão sem perfil não abre rota privada', async () => {
+  getSession.mockResolvedValueOnce({ data: { session: { user: { id: 'sem-perfil' } } } })
+  from.mockReturnValueOnce({
+    select: () => ({ eq: () => ({ single: async () => ({ data: null, error: new Error('perfil ausente') }) }) }),
+  })
+  render(
+    <MemoryRouter initialEntries={['/']}>
+      <AuthProvider>
+        <Routes>
+          <Route path="/" element={<RequireAuth><p>privado</p></RequireAuth>} />
+        </Routes>
+      </AuthProvider>
+    </MemoryRouter>,
+  )
+  expect(await screen.findByRole('alert')).toHaveTextContent('Não foi possível verificar seu acesso')
+  expect(screen.queryByText('privado')).not.toBeInTheDocument()
 })
