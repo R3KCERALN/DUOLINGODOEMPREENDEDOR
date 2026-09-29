@@ -1,5 +1,5 @@
 begin;
-select plan(7);
+select plan(8);
 
 -- 29/09 às 23:59 SP = 30/09 02:59Z
 select is(public.journal_window('2026-09-29', '2026-09-30T02:59:00Z'), 'on_time', 'mesmo dia em SP');
@@ -18,6 +18,10 @@ set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-00000000000a","r
 insert into public.journal_entries (date, learned, practiced, tomorrow, complete)
 values (timezone('America/Sao_Paulo', now())::date, 'aprendi algo útil hoje', 'curto', 'amanhã vou treinar mais', true);
 select is((select complete from public.journal_entries limit 1), false, 'cliente não força complete; campo curto');
+
+select throws_ok(
+  $$ update public.journal_entries set date = date - 1 $$,
+  'P0001', 'journal_date_immutable', 'data de entrada existente não pode mudar');
 
 select throws_ok(
   $$ insert into public.journal_entries (date, learned, practiced, tomorrow)

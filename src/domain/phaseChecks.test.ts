@@ -8,6 +8,10 @@ const base: AutoCheckInput = {
 
 test('nada marcado sem dados', () => expect(deriveAutoChecks(base).size).toBe(0))
 
+test('lista vazia de objetivos não libera o portão', () => {
+  expect(deriveAutoChecks({ ...base, originalObjectiveIds: [] }).has('f2_all_original_objectives')).toBe(false)
+})
+
 test('vídeos da F1', () => {
   expect(deriveAutoChecks({ ...base, watchedVideoIds: new Set(['v1', 'v2']) }).has('f1_all_videos')).toBe(true)
 })

@@ -29,6 +29,7 @@ export function drawScenario(items: ReelItem[], d: Difficulty, recentObjectiveId
     complicationIds = none ? [none.id] : []
   } else {
     const real = active(4).filter((i) => !i.isNone)
+    if (real.length === 0) throw new RouletteError('Nenhuma complicação ativa no banco de cenários.')
     const wanted = d === 'medio' ? 1 : 2 + Math.floor(rng() * 2)
     complicationIds = shuffle(real, rng).slice(0, wanted).map((i) => i.id)
   }

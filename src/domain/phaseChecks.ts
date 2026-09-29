@@ -13,7 +13,7 @@ export interface AutoCheckInput {
 export function deriveAutoChecks(i: AutoCheckInput): Set<AutoCheck> {
   const out = new Set<AutoCheck>()
   if (i.f1VideoIds.length > 0 && i.f1VideoIds.every((v) => i.watchedVideoIds.has(v))) out.add('f1_all_videos')
-  if (i.originalObjectiveIds.every((o) => i.evaluatedObjectiveIds.has(o))) out.add('f2_all_original_objectives')
+  if (i.originalObjectiveIds.length > 0 && i.originalObjectiveIds.every((o) => i.evaluatedObjectiveIds.has(o))) out.add('f2_all_original_objectives')
   const f2 = average(i.f2Officials)
   if (f2 !== null && f2 >= 15) out.add('f2_avg_15')
   const hard = average(i.hardOfficials)

@@ -55,3 +55,10 @@ test('difícil com só 1 complicação ativa usa o que houver', () => {
   const b = [...mk(1, 1, 'o'), ...mk(2, 1, 'p'), ...mk(3, 1, 'd'), none, ...mk(4, 1, 'c')]
   expect(drawScenario(b, 'dificil', [], seeded(2)).complicationIds).toEqual(['c0'])
 })
+
+test('médio e difícil sem complicações ativas retornam erro legível', () => {
+  const b = [...mk(1, 1, 'o'), ...mk(2, 1, 'p'), ...mk(3, 1, 'd'), none]
+  for (const difficulty of ['medio', 'dificil'] as const) {
+    expect(() => drawScenario(b, difficulty, [])).toThrow(/complicação ativa/i)
+  }
+})
