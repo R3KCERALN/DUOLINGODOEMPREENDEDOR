@@ -1,1 +1,68 @@
 @import "tailwindcss";
+@import "@fontsource-variable/nunito";
+
+:root {
+  --bg: #fff8f1;
+  --surface: #ffffff;
+  --ink: #1f1a2e;
+  --muted: #625b70;
+  --line: #efe4d8;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16131f;
+    --surface: #221c30;
+    --ink: #f6f1ea;
+    --muted: #b3abc0;
+    --line: #342d47;
+    color-scheme: dark;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+}
+
+@theme {
+  --font-sans: "Nunito Variable", ui-sans-serif, system-ui, sans-serif;
+
+  --color-brand: #e4572e;
+  --color-brand-strong: #b83d17;
+  --color-success: #1f7a50;
+  --color-streak: #f2b632;
+  --color-danger: #c0392b;
+  --color-locked: #cfc6bc;
+  --color-f1: #b83d17;
+  --color-f2: #6645d8;
+  --color-f3: #0f7466;
+  --color-f4: #f2b632;
+
+  --radius-card: 1.25rem;
+  --radius-pill: 999px;
+  --shadow-press: 0 4px 0 0 rgb(0 0 0 / 0.18);
+
+  --duration-fast: 120ms;
+  --duration-base: 220ms;
+  --duration-slow: 600ms;
+  --ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@layer base {
+  body {
+    @apply bg-bg text-ink font-sans antialiased;
+    font-feature-settings: "tnum" 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+  }
+}
