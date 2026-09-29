@@ -1,51 +1,47 @@
 @import "tailwindcss";
-@import "@fontsource-variable/nunito";
+@import "@fontsource-variable/atkinson-hyperlegible-next";
+@import "@fontsource-variable/doto";
 
+/* Tema único escuro: "cyber cassino" em 1-bit. Tudo é tinta (lemon) ou vazio;
+   dithering substitui gradientes e o glow só aparece em estados "acesos". */
 :root {
-  --bg: #fff8f1;
-  --surface: #ffffff;
-  --ink: #1f1a2e;
-  --muted: #625b70;
-  --line: #efe4d8;
-  color-scheme: light;
+  color-scheme: dark;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #16131f;
-    --surface: #221c30;
-    --ink: #f6f1ea;
-    --muted: #b3abc0;
-    --line: #342d47;
-    color-scheme: dark;
-  }
-}
+@theme static {
+  --font-sans: "Atkinson Hyperlegible Next Variable", ui-sans-serif, system-ui, sans-serif;
+  /* Doto (matriz de pontos): só display, a partir de ~20px. */
+  --font-display: "Doto Variable", ui-monospace, monospace;
 
-@theme inline {
-  --color-bg: var(--bg);
-  --color-surface: var(--surface);
-  --color-ink: var(--ink);
-  --color-muted: var(--muted);
-  --color-line: var(--line);
-}
+  --color-bg: #0D100C;
+  --color-surface: #171B15;
+  --color-raised: #22271D;
+  --color-edge: #2C3226;
+  --color-ink: #F4F6ED;
+  --color-muted: #B3BBAA;
+  --color-line: #636E58;
 
-@theme {
-  --font-sans: "Nunito Variable", ui-sans-serif, system-ui, sans-serif;
+  --color-brand: #B8C42A;
+  --color-brand-strong: #CEDB3E;
+  --color-brand-press: #9DA91E;
+  --color-brand-deep: #4F5810;
+  --color-on-brand: #111408;
 
-  --color-brand: #e4572e;
-  --color-brand-strong: #b83d17;
-  --color-success: #1f7a50;
-  --color-streak: #f2b632;
-  --color-danger: #c0392b;
-  --color-locked: #cfc6bc;
-  --color-f1: #b83d17;
-  --color-f2: #6645d8;
-  --color-f3: #0f7466;
-  --color-f4: #f2b632;
+  --color-success: #7FD39A;
+  --color-streak: #FF9E4A;
+  --color-danger: #FF7A61;
+  --color-locked: #7A8570;
 
-  --radius-card: 1.25rem;
+  /* Fichas das fases: lemon, ciano, âmbar e platina. */
+  --color-f1: #B8C42A;
+  --color-f2: #62C9D8;
+  --color-f3: #E9A23B;
+  --color-f4: #F4F6ED;
+
+  --radius-card: 0.75rem;
+  --radius-control: 0.5rem;
   --radius-pill: 999px;
-  --shadow-press: 0 4px 0 0 rgb(0 0 0 / 0.18);
+  --shadow-press: 0 4px 0 0 #050604;
 
   --duration-fast: 120ms;
   --duration-base: 220ms;
@@ -60,9 +56,69 @@
   }
 }
 
+/* ---- Dithering ---- */
+
+/* Retícula de pontos (1 ponto a cada 4px), na cor de --dither-ink. */
+@utility dither-dots {
+  background-image: radial-gradient(var(--dither-ink, rgb(184 196 42 / 0.22)) 0.75px, transparent 1px);
+  background-size: 4px 4px;
+}
+
+/* Xadrez 50% (2x2), o "cinza" do 1-bit. */
+@utility dither-checker {
+  background-image: conic-gradient(var(--dither-ink, var(--color-raised)) 25%, transparent 0 50%,
+    var(--dither-ink, var(--color-raised)) 0 75%, transparent 0);
+  background-size: 4px 4px;
+}
+
+/* Degradê Bayer 4x4 de transparente para o fundo, em 32px. Para o topo, use rotate-180. */
+@utility dither-fade {
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 4 16' shape-rendering='crispEdges' preserveAspectRatio='none'%3E%3Cpath fill='%230D100C' d='M0 0h1v1h-1zM2 2h1v1h-1zM0 4h1v1h-1zM2 4h1v1h-1zM1 5h1v1h-1zM0 6h1v1h-1zM2 6h1v1h-1zM1 7h1v1h-1zM3 7h1v1h-1zM0 8h1v1h-1zM1 8h1v1h-1zM2 8h1v1h-1zM1 9h1v1h-1zM3 9h1v1h-1zM0 10h1v1h-1zM2 10h1v1h-1zM3 10h1v1h-1zM1 11h1v1h-1zM3 11h1v1h-1zM0 12h1v1h-1zM1 12h1v1h-1zM2 12h1v1h-1zM3 12h1v1h-1zM0 13h1v1h-1zM1 13h1v1h-1zM3 13h1v1h-1zM0 14h1v1h-1zM1 14h1v1h-1zM2 14h1v1h-1zM3 14h1v1h-1zM0 15h1v1h-1zM1 15h1v1h-1zM2 15h1v1h-1zM3 15h1v1h-1z'/%3E%3C/svg%3E") repeat-x bottom / 8px 32px;
+}
+
+/* Linhas de varredura para sobrepor em artes e painéis (use com pointer-events-none). */
+@utility scanlines {
+  background-image: repeating-linear-gradient(to bottom, transparent 0 2px, rgb(0 0 0 / 0.3) 2px 3px);
+}
+
+/* Artes 1-bit: sem suavização ao escalar. */
+@utility pixelated {
+  image-rendering: pixelated;
+}
+
+/* Lâmpada acesa: contorno fino + halo curto. --glow define a cor. */
+@utility glow {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--glow, var(--color-brand)) 55%, transparent),
+    0 0 22px -6px var(--glow, var(--color-brand));
+}
+
+@utility text-glow {
+  text-shadow: 0 0 14px color-mix(in srgb, var(--glow, var(--color-brand)) 55%, transparent);
+}
+
+/* Borda de ficha de cassino: 6 insertos escuros sobre a cor da fase (--chip). */
+@utility chip-edge {
+  background: repeating-conic-gradient(from 15deg, var(--chip) 0 40deg, var(--color-bg) 40deg 60deg);
+}
+
+/* Barra de energia: células de 6px com vão de 2px. */
+@utility energy-cells {
+  background: repeating-linear-gradient(to right, var(--fill) 0 6px, transparent 6px 8px);
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--fill) 60%, transparent));
+}
+
+@keyframes lamp {
+  50% { box-shadow: 0 0 0 1px var(--glow, var(--color-brand)), 0 0 30px -2px var(--glow, var(--color-brand)); }
+}
+
+@utility animate-lamp {
+  animation: lamp 1.6s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 1ms !important;
   }
 }

@@ -1,10 +1,11 @@
 import type { ButtonHTMLAttributes } from 'react'
 
+const pressable = 'active:translate-y-1 active:shadow-none'
 const variants = {
-  primary: 'bg-brand-strong text-white shadow-press active:translate-y-1 active:shadow-none',
-  secondary: 'bg-surface text-ink border-2 border-line shadow-press active:translate-y-1 active:shadow-none',
-  ghost: 'bg-transparent text-ink hover:bg-line/50',
-  danger: 'bg-danger text-white shadow-press active:translate-y-1 active:shadow-none',
+  primary: `bg-brand text-on-brand shadow-[0_4px_0_0_var(--color-brand-deep)] hover:bg-brand-strong hover:glow active:bg-brand-press ${pressable}`,
+  secondary: `bg-raised text-ink border-2 border-line shadow-press hover:border-muted ${pressable}`,
+  ghost: 'bg-transparent text-ink hover:bg-raised',
+  danger: `bg-danger text-on-brand shadow-[0_4px_0_0_#6B2418] ${pressable}`,
 }
 const sizes = { sm: 'h-9 px-3 text-sm', md: 'h-12 px-5 text-base', lg: 'h-14 px-6 text-lg' }
 
@@ -20,11 +21,12 @@ export function Button({ variant = 'primary', size = 'md', loading = false, disa
       {...rest}
       disabled={disabled || loading}
       aria-busy={loading}
-      className={`inline-flex items-center justify-center gap-2 rounded-pill font-extrabold uppercase tracking-wide
-        transition-transform duration-[var(--duration-fast)] focus-visible:outline-3 focus-visible:outline-offset-2
-        focus-visible:outline-brand disabled:opacity-60 disabled:pointer-events-none ${variants[variant]} ${sizes[size]} ${className}`}
+      className={`inline-flex items-center justify-center gap-2 rounded-control font-extrabold uppercase tracking-wider
+        transition-[translate,background-color,box-shadow] duration-[var(--duration-fast)] focus-visible:outline-3
+        focus-visible:outline-offset-3 focus-visible:outline-ink disabled:opacity-60 disabled:pointer-events-none
+        ${variants[variant]} ${sizes[size]} ${className}`}
     >
-      {loading && <span className="size-4 animate-spin rounded-full border-2 border-current border-t-transparent" aria-hidden />}
+      {loading && <span className="size-2.5 animate-spin bg-current" aria-hidden />}
       {children}
     </button>
   )

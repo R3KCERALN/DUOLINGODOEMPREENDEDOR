@@ -1,15 +1,14 @@
+import type { CSSProperties } from 'react'
 import type { PhaseId } from '@/content/types'
 
-const fills: Record<string, string> = {
-  brand: 'bg-brand', success: 'bg-success', f1: 'bg-f1', f2: 'bg-f2', f3: 'bg-f3', f4: 'bg-f4',
-}
-
+// Barra de energia: trilho escuro com células acesas na cor do tom.
 export function ProgressBar({ value, label, tone = 'brand' }: { value: number; label: string; tone?: 'brand' | 'success' | PhaseId }) {
   const pct = Math.round(Math.min(1, Math.max(0, value)) * 100)
   return (
     <div role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}
-      className="h-4 w-full overflow-hidden rounded-pill bg-line">
-      <div className={`h-full rounded-pill ${fills[tone]} transition-[width] duration-[var(--duration-slow)]`} style={{ width: `${pct}%` }} />
+      className="h-5 w-full overflow-hidden rounded-[4px] border-2 border-line bg-bg p-[2px]">
+      <div className="h-full energy-cells transition-[width] duration-[var(--duration-slow)]"
+        style={{ width: `${pct}%`, '--fill': `var(--color-${tone})` } as CSSProperties} />
     </div>
   )
 }
