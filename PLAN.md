@@ -2397,3 +2397,1812 @@ Expected: login por magic link funcionando na URL da Vercel.
 ## Após a Parte 2
 
 Com as Tasks 1–12 verdes: E1, E2 e E3 estão concluídas. O próximo passo é detalhar **E4 — Trilha** neste arquivo (nova "Parte 3") no mesmo formato, reutilizando `computeNodeStates`, `deriveAutoChecks`, `PathNode`, `Checkbox` e `ProgressBar`.
+
+---
+
+# Parte 3 — Plano detalhado: E4 Trilha
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Entregar o mapa da trilha (estilo Duolingo, com baú de fase e override do mentor), a tela da semana, a tela Hoje e a camada de dados de progresso, fechando com um E2E "concluir semana → próxima liberada".
+
+**Architecture:** Toda regra continua pura em `src/domain` (novos `trailState.ts` e `routine.ts`, que reaproveitam `computeNodeStates` e `deriveAutoChecks`). O acesso ao Supabase fica isolado em um único módulo de hooks TanStack Query (`src/features/progress/hooks.ts`); as telas só consomem esse módulo e os testes de tela o mockam. O contrato (tipos + nomes dos hooks) é publicado primeiro (Task 13), para W1 e W4 trabalharem em paralelo com o W3.
+
+**Tech Stack:** o da Parte 1. Nova só a dev dependency `@playwright/test` (Task 19), já prevista no Tech Stack.
+
+**Spec:** `PRD.md` §4.2 (RF-10–16), §4.3 (RF-20–23), §4.4 (RF-30–32), §4.5 (RF-40–42).
+
+## Global Constraints (adicionais à Parte 1)
+
+- Telas nunca importam `@/lib/supabase`; só `@/features/progress/hooks` (e `useAuth`). Testes de tela mockam `@/features/progress/hooks` usando `src/test/progressMocks.ts`.
+- Rotina diária (RF-30/31) é guardada em `item_progress` com id `day.<YYYY-MM-DD>.<chave>` (ex.: `day.2026-09-29.voz`); sem migração nova. A data vem sempre de `spDate(new Date())` (fuso SP).
+- Itens de portão manuais são guardados em `item_progress` com o id do `GateItem` (ex.: `f1.gate.2`). Itens com `auto` nunca são marcados à mão.
+- Visual: só componentes e tokens de `src/design` (tema "cyber cassino" aprovado). Nada de cor hex nas telas. `font-display` (Doto) só em títulos ≥ 20 px.
+- Links para rotas da E6 já usam o caminho final (`/biblioteca/:bookId`, `/caderno`, `/caderno/notas/nova?semana=<id>`); até a E6 existir, caem no redirecionamento para `/`.
+- Até a E5, `buildTrailState` recebe `NO_SIMULATIONS`: os itens automáticos `f2.gate.2`, `f2.gate.4` e `f4.gate.3` ficam desmarcados e o baú da Fase 2 só abre com override do mentor. A E5 passa os dados reais de simulados.
+- RF-42 (checklists manuais) fica na E6, com o `ChecklistEditor` já previsto no roteiro. RF-41 é coberto aqui: o RLS já permite que o mentor desmarque qualquer item, e a UI mostra erro legível quando a aluna tenta desmarcar o que não marcou.
+
+## Review Focus
+
+1. **Aluna desmarcando item marcado pelo mentor:** o RLS apaga 0 linhas sem erro; a UI não pode ficar desmarcada em silêncio. Deve voltar a marcação e mostrar "Só quem marcou este item ou o mentor pode desmarcá-lo." → unit em Task 14 + alerta em Task 16.
+2. **Rotina perto da meia-noite / celular em outro fuso:** às 23:30 de SP (02:30 UTC do dia seguinte), marcar um item da rotina grava `day.<data de SP>`, não a data UTC. → unit em Task 17.
+3. **URL direta para semana bloqueada ou inexistente:** `/trilha/w09` com a aluna na semana 1 mostra "Esta etapa ainda está bloqueada" sem checkboxes; `/trilha/w99` mostra "Semana não encontrada". → unit em Task 16.
+4. **Toque duplo em "marcar":** o segundo insert não pode estourar a chave primária de `item_progress`. → unit em Task 14 (upsert com `ignoreDuplicates`).
+5. **Item automático de portão marcado "à mão":** uma linha `f1.gate.1` em `item_progress` (inserida por API) não conta; o baú mostra o item automático desabilitado. → unit em Task 13 + Task 15.
+
+## Ordem e paralelismo
+
+| Passo | Task | Dono | Depende de | Roda em paralelo com |
+|---|---|---|---|---|
+| 1 | 13 — Domínio da trilha e contrato de dados | **W3** | Tasks 1–12 | — |
+| 2 | 14 — Hooks de dados (Supabase + TanStack Query) | **W3** | 13 | 15, 16, 17 |
+| 2 | 15 — TrailMap, baú de fase e override do mentor | **W4** | 13 | 14, 16, 17 |
+| 2 | 16 — WeekScreen | **W1** | 13 | 14, 15 |
+| 3 | 17 — TodayScreen | **W1** | 13 (depois da 16, mesmo dono) | 14, 15 |
+| 4 | 18 — AppShell e rotas | **W4** | 15, 16, 17 | — |
+| 5 | 19 — E2E: concluir semana → próxima liberada | **W4** | 14, 18 | — |
+
+**Arquivos compartilhados (evitar conflito):** `src/App.tsx` só na Task 18; `package.json`, `.gitignore` e `supabase/config.toml` só na Task 19 (quando o W3 já terminou a 14); `src/design/ui/PixelIcon.tsx` só na Task 15. Em `src/features/trail/`, W4 cria `TrailMap`, `GateChest` e `OverridePanel`; W1 cria `WeekScreen` e `youtube.ts`.
+
+## Estrutura de arquivos (criada nesta parte)
+
+```
+src/
+├── domain/
+│   ├── trailState.ts (+ .test.ts)     # T13: estado derivado da trilha (portão, fase atual, próximo item)
+│   └── routine.ts (+ .test.ts)        # T13: rotina diária (RF-30/31) e ids por dia
+├── features/
+│   ├── progress/
+│   │   ├── types.ts                   # T13: contrato de dados
+│   │   ├── hooks.ts                   # T13 (esqueleto) → T14 (implementação)
+│   │   ├── contract.test.ts           # T13: nomes exportados fixos
+│   │   └── hooks.test.tsx             # T14
+│   ├── trail/
+│   │   ├── TrailMap.tsx (+ .test.tsx) # T15
+│   │   ├── GateChest.tsx              # T15
+│   │   ├── OverridePanel.tsx          # T15
+│   │   ├── WeekScreen.tsx (+ .test.tsx) # T16
+│   │   └── youtube.ts (+ .test.ts)    # T16
+│   ├── today/TodayScreen.tsx (+ .test.tsx) # T17
+│   └── shell/AppShell.tsx (+ .test.tsx)    # T18
+├── test/progressMocks.ts              # T13: fábricas de mock para testes de tela
+└── App.tsx                            # T18: rotas autenticadas
+e2e/support.ts, e2e/trail.spec.ts, playwright.config.ts   # T19
+```
+
+---
+
+### Task 13: Domínio da trilha e contrato de dados — **[W3]**
+
+**Files:**
+- Create: `src/domain/trailState.ts`, `src/domain/routine.ts`, `src/features/progress/types.ts`, `src/features/progress/hooks.ts`, `src/test/progressMocks.ts`
+- Test: `src/domain/trailState.test.ts`, `src/domain/routine.test.ts`, `src/features/progress/contract.test.ts`
+
+**Interfaces:**
+- Consumes: `computeNodeStates`, `NodeState` (`@/domain/unlock`); `deriveAutoChecks` (`@/domain/phaseChecks`); `NODES`, `PHASES`, `nodeById` (`@/content/trail`); tipos de `@/content/types`.
+- Produces (**contrato usado por W1, W3 e W4 — não renomear**):
+  - `interface NodeOverride { nodeId: string; state: 'unlocked' | 'locked'; byName: string; at: string }`
+  - `interface SimulationFacts { originalObjectiveIds: string[]; evaluatedObjectiveIds: ReadonlySet<string>; f2Officials: number[]; hardOfficials: number[] }`, `const NO_SIMULATIONS: SimulationFacts`
+  - `interface NextPending { node: TrailNode; item: TrailItem }`
+  - `interface TrailState { states: ReadonlyMap<string, NodeState>; gateDone: ReadonlySet<string>; autoGate: ReadonlySet<string>; overrides: ReadonlyMap<string, NodeOverride>; currentPhase: PhaseId; next: NextPending | null }`
+  - `gateDoneSet(doneItems: ReadonlySet<string>, auto: ReadonlySet<AutoCheck>): Set<string>`
+  - `buildTrailState(doneItems: ReadonlySet<string>, overrides: ReadonlyMap<string, NodeOverride>, sim?: SimulationFacts): TrailState`
+  - `type RoutineKey = 'caderno' | 'voz' | 'voz_alta' | 'leitura' | 'desafio' | 'simulado' | 'video' | 'revisao' | 'chefe'`
+  - `interface RoutineItem { key: RoutineKey; label: string; minutes?: number; hint?: string }`
+  - `weekday(iso: string): number` (0 = domingo), `routineItemId(date: string, key: RoutineKey): string`, `dailyRoutine(date: string, phase: PhaseId, journalDone: boolean): RoutineItem[]`
+  - `src/features/progress/types.ts`: `ProgressData { doneItems: ReadonlySet<string> }`, `ToggleItemVars { itemId: string; done: boolean }`, `SetOverrideVars { nodeId: string; state: 'unlocked' | 'locked' | null }`, `NodeStatesResult { data: TrailState | undefined; isLoading: boolean; error: Error | null }`
+  - `src/features/progress/hooks.ts` exporta exatamente: `useProgress(): UseQueryResult<ProgressData>`, `useNodeStates(): NodeStatesResult`, `useToggleItem(): UseMutationResult<void, Error, ToggleItemVars>`, `useSetOverride(): UseMutationResult<void, Error, SetOverrideVars>`, `useJournalDays(): UseQueryResult<ReadonlySet<string>>`
+  - `src/test/progressMocks.ts`: `nodeStatesOf(done?, overrides?)`, `progressOf(done?)`, `queryOf<T>(data)`, `mutationOf(mutate?, error?)`
+
+- [ ] **Step 1: Testes do estado da trilha**
+
+`src/domain/trailState.test.ts`:
+```ts
+import { NODES } from '@/content/trail'
+import { buildTrailState, gateDoneSet, type NodeOverride } from './trailState'
+
+const none = new Map<string, NodeOverride>()
+const itemsOf = (phase: string) => NODES.filter((n) => n.phase === phase).flatMap((n) => n.items.map((i) => i.id))
+const F1_MANUAL_GATE = ['f1.gate.2', 'f1.gate.3', 'f1.gate.4', 'f1.gate.5']
+
+test('trilha nova: só a semana 1 disponível e o próximo item é o 1º obrigatório dela', () => {
+  const s = buildTrailState(new Set(), none)
+  expect(s.states.get('w01')).toBe('available')
+  expect(s.states.get('w02')).toBe('locked')
+  expect(s.currentPhase).toBe('f1')
+  expect(s.next?.node.id).toBe('w01')
+  expect(s.next?.item.id).toBe(NODES[0].items.find((i) => i.required)!.id)
+})
+
+test('itens automáticos do portão são identificados', () => {
+  expect([...buildTrailState(new Set(), none).autoGate].sort()).toEqual(['f1.gate.1', 'f2.gate.2', 'f2.gate.4', 'f4.gate.3'])
+})
+
+test('assistir aos 6 vídeos da Fase 1 marca o item automático do portão', () => {
+  const videos = NODES.filter((n) => n.phase === 'f1').flatMap((n) => n.items).filter((i) => i.kind === 'video').map((i) => i.id)
+  expect(buildTrailState(new Set(videos), none).gateDone.has('f1.gate.1')).toBe(true)
+})
+
+test('item automático não conta quando marcado à mão', () => {
+  const s = gateDoneSet(new Set(['f1.gate.1', 'f1.gate.2']), new Set())
+  expect(s.has('f1.gate.1')).toBe(false)
+  expect(s.has('f1.gate.2')).toBe(true)
+})
+
+test('Fase 1 completa com o baú fechado passa a fase atual para a 2', () => {
+  const s = buildTrailState(new Set([...itemsOf('f1'), ...F1_MANUAL_GATE]), none)
+  expect(s.states.get('w04')).toBe('done')
+  expect(s.states.get('w05')).toBe('available')
+  expect(s.currentPhase).toBe('f2')
+  expect(s.next?.node.id).toBe('w05')
+})
+
+test('dados de simulados (E5) alimentam os itens automáticos da Fase 2', () => {
+  const s = buildTrailState(new Set(), none, {
+    originalObjectiveIds: ['o1'], evaluatedObjectiveIds: new Set(['o1']), f2Officials: [16], hardOfficials: [],
+  })
+  expect(s.gateDone.has('f2.gate.2')).toBe(true)
+  expect(s.gateDone.has('f2.gate.4')).toBe(true)
+  expect(buildTrailState(new Set(), none).gateDone.has('f2.gate.4')).toBe(false)
+})
+
+test('marcas da rotina diária não interferem na trilha', () => {
+  expect(buildTrailState(new Set(['day.2026-09-29.voz']), none).states.get('w02')).toBe('locked')
+})
+
+test('override do mentor é repassado e bloqueio tira o próximo item', () => {
+  const o: NodeOverride = { nodeId: 'w01', state: 'locked', byName: 'Allan', at: '2026-09-29T15:00:00Z' }
+  const s = buildTrailState(new Set(), new Map([['w01', o]]))
+  expect(s.states.get('w01')).toBe('locked')
+  expect(s.overrides.get('w01')).toEqual(o)
+  expect(s.next).toBeNull()
+  expect(s.currentPhase).toBe('f1')
+})
+```
+
+- [ ] **Step 2: Testes da rotina**
+
+`src/domain/routine.test.ts`:
+```ts
+import { dailyRoutine, routineItemId, weekday } from './routine'
+
+const keys = (date: string, phase: 'f1' | 'f2', journalDone: boolean) => dailyRoutine(date, phase, journalDone).map((i) => i.key)
+
+test('weekday usa a data do calendário, sem fuso', () => {
+  expect(weekday('2026-09-29')).toBe(2)
+  expect(weekday('2026-10-04')).toBe(0)
+  expect(() => weekday('2026-02-30')).toThrow('Data inválida')
+  expect(() => weekday('29/09/2026')).toThrow('Data inválida')
+})
+
+test('caderno fica no topo até ser preenchido e depois vai para o fim', () => {
+  expect(keys('2026-09-29', 'f1', false)).toEqual(['caderno', 'voz', 'voz_alta', 'leitura', 'desafio', 'simulado', 'video'])
+  expect(keys('2026-09-29', 'f1', true)).toEqual(['voz', 'voz_alta', 'leitura', 'desafio', 'simulado', 'video', 'caderno'])
+})
+
+test('sábado tem simulado chefe e domingo tem revisão da semana', () => {
+  expect(keys('2026-10-03', 'f1', true)).toContain('chefe')
+  expect(keys('2026-10-03', 'f1', true)).not.toContain('revisao')
+  expect(keys('2026-10-04', 'f1', true)).toContain('revisao')
+  expect(keys('2026-10-04', 'f1', true)).not.toContain('chefe')
+})
+
+test('Fase 1 usa a escada do medo; depois vira abordagem real com a regra 70/30', () => {
+  const f1 = dailyRoutine('2026-09-29', 'f1', true).find((i) => i.key === 'desafio')!
+  const f2 = dailyRoutine('2026-09-29', 'f2', true).find((i) => i.key === 'desafio')!
+  expect(f1.label).toBe('Desafio da escada do medo')
+  expect(f1.hint).toBeUndefined()
+  expect(f2.label).toBe('1 abordagem real')
+  expect(f2.hint).toMatch(/70\/30/)
+  expect(dailyRoutine('2026-09-29', 'f1', true).find((i) => i.key === 'simulado')!.hint).toMatch(/70\/30/)
+})
+
+test('leitura em voz alta faz parte da rotina', () => {
+  expect(dailyRoutine('2026-09-29', 'f2', true).find((i) => i.key === 'voz_alta')).toEqual({ key: 'voz_alta', label: 'Leitura em voz alta', minutes: 5 })
+})
+
+test('id do item da rotina inclui o dia', () => {
+  expect(routineItemId('2026-09-29', 'voz')).toBe('day.2026-09-29.voz')
+})
+```
+
+- [ ] **Step 3: Teste do contrato dos hooks**
+
+`src/features/progress/contract.test.ts`:
+```ts
+vi.mock('@/lib/supabase', () => ({ supabase: {} }))
+
+test('o módulo de hooks exporta exatamente o contrato combinado', async () => {
+  const mod = await import('./hooks')
+  expect(Object.keys(mod).sort()).toEqual(['useJournalDays', 'useNodeStates', 'useProgress', 'useSetOverride', 'useToggleItem'])
+})
+```
+
+- [ ] **Step 4: Rodar e ver falhar**
+
+Run: `npx vitest run src/domain/trailState.test.ts src/domain/routine.test.ts src/features/progress 2>&1 | tail -15`
+Expected: FAIL — `Failed to resolve import "./trailState"` / `"./routine"` / `"./hooks"`.
+
+- [ ] **Step 5: Implementar `trailState.ts`**
+
+`src/domain/trailState.ts`:
+```ts
+import { NODES, PHASES, nodeById } from '@/content/trail'
+import type { AutoCheck, PhaseId, TrailItem, TrailNode } from '@/content/types'
+import { deriveAutoChecks } from './phaseChecks'
+import { computeNodeStates, type NodeState } from './unlock'
+
+export interface NodeOverride { nodeId: string; state: 'unlocked' | 'locked'; byName: string; at: string }
+
+export interface SimulationFacts {
+  originalObjectiveIds: string[]
+  evaluatedObjectiveIds: ReadonlySet<string>
+  f2Officials: number[]
+  hardOfficials: number[]
+}
+
+/** Até a E5 não há simulados avaliados: os itens automáticos que dependem deles ficam desmarcados. */
+export const NO_SIMULATIONS: SimulationFacts = { originalObjectiveIds: [], evaluatedObjectiveIds: new Set(), f2Officials: [], hardOfficials: [] }
+
+export interface NextPending { node: TrailNode; item: TrailItem }
+
+export interface TrailState {
+  states: ReadonlyMap<string, NodeState>
+  gateDone: ReadonlySet<string>
+  autoGate: ReadonlySet<string>
+  overrides: ReadonlyMap<string, NodeOverride>
+  currentPhase: PhaseId
+  next: NextPending | null
+}
+
+const PATH = PHASES.flatMap((p) => p.nodeIds)
+const F1_VIDEO_IDS = NODES.filter((n) => n.phase === 'f1').flatMap((n) => n.items).filter((i) => i.kind === 'video').map((i) => i.id)
+const AUTO_GATE = new Map<string, AutoCheck>(PHASES.flatMap((p) => p.gate).flatMap((g) => (g.auto ? [[g.id, g.auto] as const] : [])))
+
+export function gateDoneSet(doneItems: ReadonlySet<string>, auto: ReadonlySet<AutoCheck>): Set<string> {
+  const out = new Set<string>()
+  for (const g of PHASES.flatMap((p) => p.gate)) {
+    const check = AUTO_GATE.get(g.id)
+    if (check ? auto.has(check) : doneItems.has(g.id)) out.add(g.id)
+  }
+  return out
+}
+
+export function buildTrailState(
+  doneItems: ReadonlySet<string>,
+  overrides: ReadonlyMap<string, NodeOverride>,
+  sim: SimulationFacts = NO_SIMULATIONS,
+): TrailState {
+  const auto = deriveAutoChecks({ watchedVideoIds: doneItems, f1VideoIds: F1_VIDEO_IDS, ...sim })
+  const gateDone = gateDoneSet(doneItems, auto)
+  const states = computeNodeStates({
+    phases: PHASES,
+    nodes: NODES,
+    doneItems,
+    gateDone,
+    overrides: new Map([...overrides].map(([id, o]) => [id, o.state])),
+  })
+
+  let next: NextPending | null = null
+  for (const id of PATH) {
+    if (states.get(id) !== 'available') continue
+    const node = nodeById(id)
+    const item = node.items.find((i) => i.required && !doneItems.has(i.id))
+    if (item) { next = { node, item }; break }
+  }
+
+  const currentId = PATH.find((id) => states.get(id) === 'available') ?? [...PATH].reverse().find((id) => states.get(id) === 'done')
+  const currentPhase = currentId ? nodeById(currentId).phase : 'f1'
+
+  return { states, gateDone, autoGate: new Set(AUTO_GATE.keys()), overrides, currentPhase, next }
+}
+```
+
+- [ ] **Step 6: Implementar `routine.ts`**
+
+`src/domain/routine.ts`:
+```ts
+import type { PhaseId } from '@/content/types'
+
+export type RoutineKey = 'caderno' | 'voz' | 'voz_alta' | 'leitura' | 'desafio' | 'simulado' | 'video' | 'revisao' | 'chefe'
+export interface RoutineItem { key: RoutineKey; label: string; minutes?: number; hint?: string }
+
+const RULE_70_30 = 'Regra 70/30: o cliente fala 70% do tempo e você, 30%.'
+
+/** Dia da semana de uma data de calendário (0 = domingo), sem depender do fuso do aparelho. */
+export function weekday(iso: string): number {
+  const d = new Date(`${iso}T12:00:00Z`)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso) || Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== iso) {
+    throw new Error(`Data inválida: ${iso}`)
+  }
+  return d.getUTCDay()
+}
+
+export function routineItemId(date: string, key: RoutineKey): string {
+  return `day.${date}.${key}`
+}
+
+/** RF-30/31: rotina do dia. O caderno fica no topo até ser preenchido (RF-50). */
+export function dailyRoutine(date: string, phase: PhaseId, journalDone: boolean): RoutineItem[] {
+  const caderno: RoutineItem = { key: 'caderno', label: 'Caderno: 3 linhas', minutes: 3 }
+  const items: RoutineItem[] = [
+    { key: 'voz', label: 'Aquecimento de voz + pitch de 30 s', minutes: 5 },
+    { key: 'voz_alta', label: 'Leitura em voz alta', minutes: 5 },
+    { key: 'leitura', label: 'Leitura ou audiolivro', minutes: 20 },
+    phase === 'f1'
+      ? { key: 'desafio', label: 'Desafio da escada do medo', minutes: 10 }
+      : { key: 'desafio', label: '1 abordagem real', minutes: 10, hint: RULE_70_30 },
+    { key: 'simulado', label: 'Simulado (1 a 3 por dia)', hint: RULE_70_30 },
+    { key: 'video', label: 'Vídeo da semana ou curso', minutes: 15 },
+  ]
+  const day = weekday(date)
+  if (day === 6) items.push({ key: 'chefe', label: 'Simulado chefe', minutes: 10 })
+  if (day === 0) items.push({ key: 'revisao', label: 'Revisão da semana', minutes: 30 })
+  return journalDone ? [...items, caderno] : [caderno, ...items]
+}
+```
+
+- [ ] **Step 7: Contrato de dados, esqueleto dos hooks e mocks de teste**
+
+`src/features/progress/types.ts`:
+```ts
+import type { TrailState } from '@/domain/trailState'
+
+export interface ProgressData { doneItems: ReadonlySet<string> }
+export interface ToggleItemVars { itemId: string; done: boolean }
+/** `state: null` remove o override (volta à regra automática). */
+export interface SetOverrideVars { nodeId: string; state: 'unlocked' | 'locked' | null }
+export interface NodeStatesResult { data: TrailState | undefined; isLoading: boolean; error: Error | null }
+```
+
+`src/features/progress/hooks.ts` (esqueleto; a Task 14 troca os corpos, sem mudar nomes nem tipos):
+```ts
+import type { UseMutationResult, UseQueryResult } from '@tanstack/react-query'
+import type { NodeStatesResult, ProgressData, SetOverrideVars, ToggleItemVars } from './types'
+
+function notYet(name: string): never {
+  throw new Error(`${name}: implementado na Task 14`)
+}
+
+export function useProgress(): UseQueryResult<ProgressData> { return notYet('useProgress') }
+export function useNodeStates(): NodeStatesResult { return notYet('useNodeStates') }
+export function useToggleItem(): UseMutationResult<void, Error, ToggleItemVars> { return notYet('useToggleItem') }
+export function useSetOverride(): UseMutationResult<void, Error, SetOverrideVars> { return notYet('useSetOverride') }
+export function useJournalDays(): UseQueryResult<ReadonlySet<string>> { return notYet('useJournalDays') }
+```
+
+`src/test/progressMocks.ts`:
+```ts
+import type { UseQueryResult } from '@tanstack/react-query'
+import { buildTrailState, type NodeOverride } from '@/domain/trailState'
+import type { NodeStatesResult, ProgressData } from '@/features/progress/types'
+
+/** Estado real da trilha (via domínio) para mockar `useNodeStates`. */
+export function nodeStatesOf(done: string[] = [], overrides: NodeOverride[] = []): NodeStatesResult {
+  return { data: buildTrailState(new Set(done), new Map(overrides.map((o) => [o.nodeId, o]))), isLoading: false, error: null }
+}
+
+export function queryOf<T>(data: T): UseQueryResult<T> {
+  return { data, isLoading: false, isPending: false, isError: false, error: null, status: 'success' } as unknown as UseQueryResult<T>
+}
+
+export function progressOf(done: string[] = []): UseQueryResult<ProgressData> {
+  return queryOf<ProgressData>({ doneItems: new Set(done) })
+}
+
+/** Retorna `never` de propósito: serve para qualquer `vi.mocked(useXxx).mockReturnValue(...)` de mutation, seja qual for o contexto interno. */
+export function mutationOf(mutate = vi.fn(), error: Error | null = null): never {
+  return { mutate, mutateAsync: vi.fn(), isPending: false, error, reset: vi.fn() } as never
+}
+```
+
+- [ ] **Step 8: Rodar e ver passar**
+
+Run: `npx vitest run src/domain src/features/progress 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS em todos os arquivos; `tsc` sem erros.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/domain/trailState.ts src/domain/trailState.test.ts src/domain/routine.ts src/domain/routine.test.ts src/features/progress src/test/progressMocks.ts
+git commit -m "feat(domain): trail state, daily routine and progress data contract"
+```
+
+---
+
+### Task 14: Hooks de dados (Supabase + TanStack Query) — **[W3]**
+
+**Files:**
+- Modify: `src/features/progress/hooks.ts` (troca o esqueleto pela implementação)
+- Test: `src/features/progress/hooks.test.tsx`
+
+**Interfaces:**
+- Consumes: `supabase` (`@/lib/supabase`); `buildTrailState`, `NodeOverride` (Task 13); tipos de `./types` (Task 13). Tabelas `item_progress(item_id, done_at, done_by)`, `node_overrides(node_id, state, by, at)` com FK `by → profiles`, `journal_entries(date, complete)`.
+- Produces: os 5 hooks do contrato da Task 13, com os mesmos nomes e tipos. Query keys internas (não exportadas): `['item_progress']`, `['node_overrides']`, `['journal_days']`.
+
+- [ ] **Step 1: Testes com um Supabase falso**
+
+`src/features/progress/hooks.test.tsx`:
+```tsx
+import type { ReactNode } from 'react'
+import { act, renderHook, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { NODES } from '@/content/trail'
+import type { ProgressData } from './types'
+
+type Result = { data: unknown; error: unknown; count?: number | null }
+
+const { from, getSession, results, calls } = vi.hoisted(() => {
+  const results: Record<string, Result[]> = {}
+  const calls: { table: string; method: string; args: unknown[] }[] = []
+  const from = vi.fn((table: string) => {
+    const b: Record<string, unknown> = {}
+    for (const m of ['select', 'upsert', 'delete', 'eq']) {
+      b[m] = (...args: unknown[]) => { calls.push({ table, method: m, args }); return b }
+    }
+    b.then = (ok: (r: Result) => unknown, fail: (e: unknown) => unknown) =>
+      Promise.resolve(results[table]?.shift() ?? { data: [], error: null }).then(ok, fail)
+    return b
+  })
+  const getSession = vi.fn().mockResolvedValue({ data: { session: { user: { id: 'mentor-1' } } } })
+  return { from, getSession, results, calls }
+})
+vi.mock('@/lib/supabase', () => ({ supabase: { from, auth: { getSession } } }))
+
+import { useJournalDays, useNodeStates, useProgress, useSetOverride, useToggleItem } from './hooks'
+
+function setup() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+  const Wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+  return { qc, Wrapper }
+}
+
+beforeEach(() => {
+  calls.length = 0
+  for (const k of Object.keys(results)) delete results[k]
+})
+
+test('useProgress transforma as linhas em um conjunto de ids', async () => {
+  results.item_progress = [{ data: [{ item_id: 'w01.video.1' }], error: null }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useProgress(), { wrapper: Wrapper })
+  await waitFor(() => expect(result.current.data?.doneItems.has('w01.video.1')).toBe(true))
+})
+
+test('useNodeStates junta progresso e overrides do mentor', async () => {
+  results.item_progress = [{ data: NODES[0].items.map((i) => ({ item_id: i.id })), error: null }]
+  results.node_overrides = [{ data: [{ node_id: 'w03', state: 'unlocked', at: '2026-09-29T15:00:00Z', profiles: { name: 'Allan' } }], error: null }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useNodeStates(), { wrapper: Wrapper })
+  await waitFor(() => expect(result.current.data).toBeDefined())
+  expect(result.current.data!.states.get('w01')).toBe('done')
+  expect(result.current.data!.states.get('w02')).toBe('available')
+  expect(result.current.data!.states.get('w03')).toBe('available')
+  expect(result.current.data!.overrides.get('w03')).toEqual({ nodeId: 'w03', state: 'unlocked', byName: 'Allan', at: '2026-09-29T15:00:00Z' })
+})
+
+test('marcar item é idempotente (toque duplo não estoura a chave)', async () => {
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useToggleItem(), { wrapper: Wrapper })
+  await act(() => result.current.mutateAsync({ itemId: 'w01.pitch', done: true }))
+  expect(calls).toContainEqual({ table: 'item_progress', method: 'upsert', args: [{ item_id: 'w01.pitch' }, { onConflict: 'item_id', ignoreDuplicates: true }] })
+})
+
+test('marcação otimista volta atrás quando o banco recusa', async () => {
+  results.item_progress = [{ data: null, error: new Error('rede') }]
+  const { qc, Wrapper } = setup()
+  qc.setQueryData<ProgressData>(['item_progress'], { doneItems: new Set() })
+  const { result } = renderHook(() => useToggleItem(), { wrapper: Wrapper })
+  await act(async () => { await result.current.mutateAsync({ itemId: 'w01.pitch', done: true }).catch(() => undefined) })
+  expect(qc.getQueryData<ProgressData>(['item_progress'])!.doneItems.has('w01.pitch')).toBe(false)
+  await waitFor(() => expect(result.current.error?.message).toBe('rede'))
+})
+
+test('aluna não desmarca item marcado pelo mentor: erro legível', async () => {
+  results.item_progress = [{ data: [], error: null }, { data: null, error: null, count: 1 }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useToggleItem(), { wrapper: Wrapper })
+  await act(async () => {
+    await expect(result.current.mutateAsync({ itemId: 'f1.gate.2', done: false }))
+      .rejects.toThrow('Só quem marcou este item ou o mentor pode desmarcá-lo.')
+  })
+})
+
+test('desmarcar item que já não existe não é erro', async () => {
+  results.item_progress = [{ data: [], error: null }, { data: null, error: null, count: 0 }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useToggleItem(), { wrapper: Wrapper })
+  await act(() => result.current.mutateAsync({ itemId: 'w01.pitch', done: false }))
+  expect(calls).toContainEqual({ table: 'item_progress', method: 'eq', args: ['item_id', 'w01.pitch'] })
+})
+
+test('override grava quem fez; null volta à regra automática', async () => {
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useSetOverride(), { wrapper: Wrapper })
+  await act(() => result.current.mutateAsync({ nodeId: 'w07', state: 'unlocked' }))
+  const up = calls.find((c) => c.table === 'node_overrides' && c.method === 'upsert')!
+  expect(up.args[0]).toMatchObject({ node_id: 'w07', state: 'unlocked', by: 'mentor-1' })
+  expect(up.args[1]).toEqual({ onConflict: 'node_id' })
+  await act(() => result.current.mutateAsync({ nodeId: 'w07', state: null }))
+  expect(calls.some((c) => c.table === 'node_overrides' && c.method === 'delete')).toBe(true)
+  expect(calls).toContainEqual({ table: 'node_overrides', method: 'eq', args: ['node_id', 'w07'] })
+})
+
+test('useJournalDays lista só os dias com caderno completo', async () => {
+  results.journal_entries = [{ data: [{ date: '2026-09-28' }, { date: '2026-09-29' }], error: null }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useJournalDays(), { wrapper: Wrapper })
+  await waitFor(() => expect(result.current.data?.has('2026-09-29')).toBe(true))
+  expect(calls).toContainEqual({ table: 'journal_entries', method: 'eq', args: ['complete', true] })
+})
+```
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/features/progress/hooks.test.tsx 2>&1 | tail -15`
+Expected: FAIL — `useProgress: implementado na Task 14` (esqueleto da Task 13).
+
+- [ ] **Step 3: Implementar os hooks**
+
+`src/features/progress/hooks.ts` (substitui o arquivo inteiro):
+```ts
+import { useMemo } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { supabase } from '@/lib/supabase'
+import { buildTrailState, type NodeOverride } from '@/domain/trailState'
+import type { NodeStatesResult, ProgressData, SetOverrideVars, ToggleItemVars } from './types'
+
+const PROGRESS = ['item_progress'] as const
+const OVERRIDES = ['node_overrides'] as const
+const JOURNAL_DAYS = ['journal_days'] as const
+
+async function fetchProgress(): Promise<ProgressData> {
+  const { data, error } = await supabase.from('item_progress').select('item_id')
+  if (error) throw error
+  return { doneItems: new Set(data.map((r: { item_id: string }) => r.item_id)) }
+}
+
+type OverrideRow = { node_id: string; state: 'unlocked' | 'locked'; at: string; profiles: { name: string } | null }
+
+async function fetchOverrides(): Promise<Map<string, NodeOverride>> {
+  const { data, error } = await supabase.from('node_overrides').select('node_id, state, at, profiles(name)')
+  if (error) throw error
+  return new Map((data as OverrideRow[]).map((r) => [
+    r.node_id,
+    { nodeId: r.node_id, state: r.state, at: r.at, byName: r.profiles?.name ?? 'mentor' },
+  ]))
+}
+
+export function useProgress() {
+  return useQuery({ queryKey: PROGRESS, queryFn: fetchProgress })
+}
+
+export function useNodeStates(): NodeStatesResult {
+  const progress = useProgress()
+  const overrides = useQuery({ queryKey: OVERRIDES, queryFn: fetchOverrides })
+  const data = useMemo(
+    () => (progress.data && overrides.data ? buildTrailState(progress.data.doneItems, overrides.data) : undefined),
+    [progress.data, overrides.data],
+  )
+  return { data, isLoading: progress.isLoading || overrides.isLoading, error: progress.error ?? overrides.error ?? null }
+}
+
+export function useToggleItem() {
+  const qc = useQueryClient()
+  return useMutation<void, Error, ToggleItemVars, { prev?: ProgressData }>({
+    mutationFn: async ({ itemId, done }) => {
+      if (done) {
+        const { error } = await supabase.from('item_progress').upsert({ item_id: itemId }, { onConflict: 'item_id', ignoreDuplicates: true })
+        if (error) throw error
+        return
+      }
+      const { data, error } = await supabase.from('item_progress').delete().eq('item_id', itemId).select('item_id')
+      if (error) throw error
+      if (data.length > 0) return
+      // RLS apaga 0 linhas sem erro quando a aluna tenta desmarcar o que o mentor marcou (RF-41).
+      const { count, error: countError } = await supabase.from('item_progress').select('item_id', { count: 'exact', head: true }).eq('item_id', itemId)
+      if (countError) throw countError
+      if (count) throw new Error('Só quem marcou este item ou o mentor pode desmarcá-lo.')
+    },
+    onMutate: async ({ itemId, done }) => {
+      await qc.cancelQueries({ queryKey: PROGRESS })
+      const prev = qc.getQueryData<ProgressData>(PROGRESS)
+      if (prev) {
+        const doneItems = new Set(prev.doneItems)
+        if (done) doneItems.add(itemId)
+        else doneItems.delete(itemId)
+        qc.setQueryData<ProgressData>(PROGRESS, { doneItems })
+      }
+      return { prev }
+    },
+    onError: (_e, _v, ctx) => { if (ctx?.prev) qc.setQueryData(PROGRESS, ctx.prev) },
+    onSettled: () => qc.invalidateQueries({ queryKey: PROGRESS }),
+  })
+}
+
+export function useSetOverride() {
+  const qc = useQueryClient()
+  return useMutation<void, Error, SetOverrideVars>({
+    mutationFn: async ({ nodeId, state }) => {
+      if (state === null) {
+        const { error } = await supabase.from('node_overrides').delete().eq('node_id', nodeId)
+        if (error) throw error
+        return
+      }
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session) throw new Error('Sessão expirada. Entre de novo.')
+      const { error } = await supabase.from('node_overrides').upsert(
+        { node_id: nodeId, state, by: session.user.id, at: new Date().toISOString() },
+        { onConflict: 'node_id' },
+      )
+      if (error) throw error
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: OVERRIDES }),
+  })
+}
+
+/** Datas (SP) com caderno completo. Só a aluna escreve no caderno (RLS aluna_insert). */
+export function useJournalDays() {
+  return useQuery({
+    queryKey: JOURNAL_DAYS,
+    queryFn: async (): Promise<ReadonlySet<string>> => {
+      const { data, error } = await supabase.from('journal_entries').select('date').eq('complete', true)
+      if (error) throw error
+      return new Set(data.map((r: { date: string }) => r.date))
+    },
+  })
+}
+```
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npx vitest run src/features/progress 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS (hooks + contrato); `tsc` sem erros.
+
+- [ ] **Step 5: Conferir contra o banco local**
+
+Run: `npx supabase test db 2>&1 | tail -5`
+Expected: PASS (nenhuma migração nova; confirma que RLS de `item_progress`/`node_overrides` segue verde).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/features/progress/hooks.ts src/features/progress/hooks.test.tsx
+git commit -m "feat(progress): supabase hooks for progress, node states and overrides"
+```
+
+---
+
+### Task 15: TrailMap, baú de fase e override do mentor — **[W4]**
+
+**Files:**
+- Create: `src/features/trail/TrailMap.tsx`, `src/features/trail/GateChest.tsx`, `src/features/trail/OverridePanel.tsx`
+- Modify: `src/design/ui/PixelIcon.tsx` (glifo `chest`)
+- Test: `src/features/trail/TrailMap.test.tsx`
+
+**Interfaces:**
+- Consumes: `useNodeStates`, `useToggleItem`, `useSetOverride` (contrato da Task 13); `TrailState`, `NodeOverride`; `PHASES`, `nodeById`; `useAuth` (`profile.role`); `PathNode`, `Button`, `Badge`, `Checkbox`, `PixelIcon` de `@/design/ui`; `TZ` de `@/lib/dates`.
+- Produces: `export function TrailMap(): JSX.Element` (rota `/trilha`). Rótulos acessíveis usados pelo E2E: botões `"Semana N, disponível|bloqueada|concluída"` (Fase 4: `"<tema>, …"`), `"Baú da Fase N, X de Y itens"`, `"Ajustar Semana N"` (só mentor).
+
+- [ ] **Step 1: Testes**
+
+`src/features/trail/TrailMap.test.tsx`:
+```tsx
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { MemoryRouter, Route, Routes } from 'react-router'
+import { NODES } from '@/content/trail'
+import { mutationOf, nodeStatesOf } from '@/test/progressMocks'
+
+vi.mock('@/features/progress/hooks', () => ({ useNodeStates: vi.fn(), useToggleItem: vi.fn(), useSetOverride: vi.fn() }))
+vi.mock('@/features/auth/AuthProvider', () => ({ useAuth: vi.fn() }))
+
+import { useNodeStates, useSetOverride, useToggleItem } from '@/features/progress/hooks'
+import { useAuth } from '@/features/auth/AuthProvider'
+import { TrailMap } from './TrailMap'
+
+const toggle = vi.fn()
+const setOverride = vi.fn()
+const W01 = NODES.find((n) => n.id === 'w01')!.items.map((i) => i.id)
+
+function asRole(role: 'aluna' | 'mentor') {
+  vi.mocked(useAuth).mockReturnValue({
+    session: null, loading: false, signOut: vi.fn(),
+    profile: { id: role, role, name: role === 'mentor' ? 'Allan' : 'Ana' },
+  })
+}
+
+function renderMap() {
+  return render(
+    <MemoryRouter initialEntries={['/trilha']}>
+      <Routes>
+        <Route path="/trilha" element={<TrailMap />} />
+        <Route path="/trilha/:nodeId" element={<p>Semana aberta</p>} />
+      </Routes>
+    </MemoryRouter>,
+  )
+}
+
+beforeEach(() => {
+  toggle.mockReset()
+  setOverride.mockReset()
+  vi.mocked(useToggleItem).mockReturnValue(mutationOf(toggle))
+  vi.mocked(useSetOverride).mockReturnValue(mutationOf(setOverride))
+  vi.mocked(useNodeStates).mockReturnValue(nodeStatesOf())
+  asRole('aluna')
+})
+
+test('trilha nova: fases agrupadas, semana 1 disponível e semana 2 bloqueada', () => {
+  renderMap()
+  expect(screen.getByRole('heading', { name: 'Fase 1: Comunicação' })).toBeInTheDocument()
+  expect(screen.getByRole('heading', { name: 'Fase 4: Avançado' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Semana 1, disponível' })).toBeEnabled()
+  expect(screen.getByRole('button', { name: 'Semana 2, bloqueada' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Negociação, bloqueada' })).toBeDisabled()
+})
+
+test('semana concluída libera a próxima, que abre a tela da semana', async () => {
+  vi.mocked(useNodeStates).mockReturnValue(nodeStatesOf(W01))
+  renderMap()
+  expect(screen.getByRole('button', { name: 'Semana 1, concluída' })).toBeEnabled()
+  await userEvent.click(screen.getByRole('button', { name: 'Semana 2, disponível' }))
+  expect(screen.getByText('Semana aberta')).toBeInTheDocument()
+})
+
+test('baú da fase marca item manual e trava o automático', async () => {
+  renderMap()
+  await userEvent.click(screen.getByRole('button', { name: 'Baú da Fase 1, 0 de 5 itens' }))
+  expect(screen.getByRole('checkbox', { name: 'Assistiu aos 6 vídeos da fase (automático)' })).toBeDisabled()
+  await userEvent.click(screen.getByRole('checkbox', { name: 'Completou os 4 degraus da escada do medo' }))
+  expect(toggle).toHaveBeenCalledWith({ itemId: 'f1.gate.2', done: true })
+})
+
+test('item automático gravado à mão não aparece marcado no baú', async () => {
+  vi.mocked(useNodeStates).mockReturnValue(nodeStatesOf(['f1.gate.1']))
+  renderMap()
+  await userEvent.click(screen.getByRole('button', { name: 'Baú da Fase 1, 0 de 5 itens' }))
+  expect(screen.getByRole('checkbox', { name: 'Assistiu aos 6 vídeos da fase (automático)' })).not.toBeChecked()
+})
+
+test('mentor vê quem liberou e pode bloquear', async () => {
+  asRole('mentor')
+  vi.mocked(useNodeStates).mockReturnValue(nodeStatesOf([], [{ nodeId: 'w03', state: 'unlocked', byName: 'Allan', at: '2026-09-29T15:00:00Z' }]))
+  renderMap()
+  expect(screen.getByRole('button', { name: 'Semana 3, disponível' })).toBeEnabled()
+  await userEvent.click(screen.getByRole('button', { name: 'Ajustar Semana 3' }))
+  expect(screen.getByText('Liberada por Allan em 29/09, 12:00')).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: 'Bloquear' }))
+  expect(setOverride).toHaveBeenCalledWith({ nodeId: 'w03', state: 'locked' })
+  await userEvent.click(screen.getByRole('button', { name: 'Voltar ao automático' }))
+  expect(setOverride).toHaveBeenCalledWith({ nodeId: 'w03', state: null })
+})
+
+test('aluna não vê os controles do mentor', () => {
+  renderMap()
+  expect(screen.queryByRole('button', { name: /^Ajustar/ })).not.toBeInTheDocument()
+})
+
+test('Fase 4 explica a escolha de 1 tema por mês', () => {
+  renderMap()
+  expect(screen.getByText(/Escolha 1 por mês/)).toBeInTheDocument()
+})
+
+test('mostra carregamento e erro legível', () => {
+  vi.mocked(useNodeStates).mockReturnValue({ data: undefined, isLoading: true, error: null })
+  const { unmount } = renderMap()
+  expect(screen.getByRole('status')).toHaveTextContent('Carregando a trilha')
+  unmount()
+  vi.mocked(useNodeStates).mockReturnValue({ data: undefined, isLoading: false, error: new Error('rede') })
+  renderMap()
+  expect(screen.getByRole('alert')).toHaveTextContent('Não foi possível carregar a trilha')
+})
+```
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/features/trail/TrailMap.test.tsx 2>&1 | tail -15`
+Expected: FAIL — `Failed to resolve import "./TrailMap"`.
+
+- [ ] **Step 3: Glifo do baú**
+
+Em `src/design/ui/PixelIcon.tsx`, acrescentar ao objeto `glyphs` (depois de `notes`):
+```ts
+  chest: ['.#####.', '#.....#', '#######', '#..#..#', '#.###.#', '#.....#', '#######'],
+```
+
+- [ ] **Step 4: Painel de override (RF-15)**
+
+`src/features/trail/OverridePanel.tsx`:
+```tsx
+import { Button } from '@/design/ui'
+import type { NodeOverride } from '@/domain/trailState'
+import { useSetOverride } from '@/features/progress/hooks'
+import { TZ } from '@/lib/dates'
+
+const when = new Intl.DateTimeFormat('pt-BR', { timeZone: TZ, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+
+export function OverridePanel({ nodeId, label, current }: { nodeId: string; label: string; current?: NodeOverride }) {
+  const setOverride = useSetOverride()
+  const busy = setOverride.isPending
+  const choose = (state: 'unlocked' | 'locked' | null) => setOverride.mutate({ nodeId, state })
+  return (
+    <div role="group" aria-label={`Liberação de ${label}`} className="flex w-full flex-col gap-2 rounded-card border border-edge bg-surface p-3">
+      <p className="text-sm text-muted">
+        {current
+          ? `${current.state === 'unlocked' ? 'Liberada' : 'Bloqueada'} por ${current.byName} em ${when.format(new Date(current.at))}`
+          : 'Seguindo a regra automática.'}
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant="secondary" disabled={busy || current?.state === 'unlocked'} onClick={() => choose('unlocked')}>Liberar</Button>
+        <Button size="sm" variant="secondary" disabled={busy || current?.state === 'locked'} onClick={() => choose('locked')}>Bloquear</Button>
+        <Button size="sm" variant="ghost" disabled={busy || !current} onClick={() => choose(null)}>Voltar ao automático</Button>
+      </div>
+      {setOverride.error && <p role="alert" className="text-sm text-danger">Não foi possível salvar: {setOverride.error.message}</p>}
+    </div>
+  )
+}
+```
+
+- [ ] **Step 5: Baú da fase (RF-13, RF-40)**
+
+`src/features/trail/GateChest.tsx`:
+```tsx
+import { useState } from 'react'
+import type { Phase } from '@/content/types'
+import { Badge, Checkbox, PixelIcon } from '@/design/ui'
+import type { TrailState } from '@/domain/trailState'
+import { useToggleItem } from '@/features/progress/hooks'
+
+export function GateChest({ phase, phaseNumber, trail }: { phase: Phase; phaseNumber: number; trail: TrailState }) {
+  const toggle = useToggleItem()
+  const [open, setOpen] = useState(false)
+  const total = phase.gate.length
+  const done = phase.gate.filter((g) => trail.gateDone.has(g.id)).length
+  const full = done === total
+  const panelId = `bau-${phase.id}`
+  return (
+    <div className="flex w-full flex-col items-center gap-3">
+      <button type="button" aria-expanded={open} aria-controls={panelId}
+        aria-label={`Baú da Fase ${phaseNumber}, ${done} de ${total} itens`}
+        onClick={() => setOpen((o) => !o)}
+        className={`flex items-center gap-3 rounded-card border-2 bg-surface px-4 py-3 font-bold
+          focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-ink
+          ${full ? 'border-brand text-brand glow' : 'border-line text-muted'}`}>
+        <PixelIcon name="chest" className="size-8" />
+        <span className="text-ink">Baú da Fase {phaseNumber}</span>
+        <Badge tone={full ? 'brand' : 'muted'}>{done}/{total}</Badge>
+      </button>
+      {open && (
+        <ul id={panelId} className="w-full rounded-card border border-edge bg-surface p-2">
+          {phase.gate.map((g) => {
+            const auto = trail.autoGate.has(g.id)
+            return (
+              <li key={g.id}>
+                <Checkbox checked={trail.gateDone.has(g.id)} disabled={auto}
+                  label={auto ? `${g.text} (automático)` : g.text}
+                  onChange={(checked) => toggle.mutate({ itemId: g.id, done: checked })} />
+              </li>
+            )
+          })}
+        </ul>
+      )}
+      {toggle.error && <p role="alert" className="text-sm text-danger">{toggle.error.message}</p>}
+    </div>
+  )
+}
+```
+
+- [ ] **Step 6: Mapa (RF-10, RF-11, RF-14)**
+
+`src/features/trail/TrailMap.tsx`:
+```tsx
+import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router'
+import { PHASES, nodeById } from '@/content/trail'
+import type { TrailNode } from '@/content/types'
+import { Button, PathNode } from '@/design/ui'
+import { useAuth } from '@/features/auth/AuthProvider'
+import { useNodeStates } from '@/features/progress/hooks'
+import { GateChest } from './GateChest'
+import { OverridePanel } from './OverridePanel'
+
+// Zigue-zague do caminho, em múltiplos de 40px.
+const OFFSETS = [0, 1, 2, 1, 0, -1, -2, -1]
+
+function nodeLabel(node: TrailNode): string {
+  return node.week !== undefined ? `Semana ${node.week}` : node.title
+}
+
+export function TrailMap() {
+  const { data, isLoading, error } = useNodeStates()
+  const { profile } = useAuth()
+  const navigate = useNavigate()
+  const [adjusting, setAdjusting] = useState<string | null>(null)
+  const currentRef = useRef<HTMLDivElement>(null)
+  const currentId = data?.next?.node.id
+
+  useEffect(() => {
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    currentRef.current?.scrollIntoView?.({ block: 'center', behavior: reduce ? 'auto' : 'smooth' })
+  }, [currentId])
+
+  if (isLoading) return <p role="status" className="p-6 text-muted">Carregando a trilha…</p>
+  if (error || !data) {
+    return <p role="alert" className="p-6 text-danger">Não foi possível carregar a trilha. Verifique a conexão e recarregue a página.</p>
+  }
+
+  const isMentor = profile?.role === 'mentor'
+  return (
+    <main className="mx-auto flex max-w-md flex-col gap-12 px-4 pt-6 pb-8">
+      <h1 className="font-display text-5xl leading-none font-black text-brand text-glow">Trilha</h1>
+      {PHASES.map((phase, pi) => (
+        <section key={phase.id} aria-labelledby={`fase-${phase.id}`} className="flex flex-col items-center gap-6">
+          <header className="self-stretch">
+            <h2 id={`fase-${phase.id}`} className="text-xl font-bold">Fase {pi + 1}: {phase.title}</h2>
+            {phase.id === 'f4' && (
+              <p className="text-sm text-muted">Depois do baú da Fase 3, todos os temas abrem juntos. Escolha 1 por mês.</p>
+            )}
+          </header>
+          <ol className="flex w-full flex-col items-center gap-6">
+            {phase.nodeIds.map((id, i) => {
+              const node = nodeById(id)
+              const label = nodeLabel(node)
+              return (
+                <li key={id} className="flex w-full flex-col items-center gap-2">
+                  <div ref={id === currentId ? currentRef : undefined}
+                    style={{ translate: `${OFFSETS[i % OFFSETS.length] * 40}px 0` }}
+                    className="flex flex-col items-center gap-1.5">
+                    <PathNode state={data.states.get(id) ?? 'locked'} phase={node.phase} label={label}
+                      onClick={() => navigate(`/trilha/${id}`)} />
+                    <span className="text-sm font-bold">{label}</span>
+                    {node.week !== undefined && <span className="max-w-40 text-center text-xs text-muted">{node.title}</span>}
+                    {isMentor && (
+                      <Button variant="ghost" size="sm" aria-label={`Ajustar ${label}`} aria-expanded={adjusting === id}
+                        onClick={() => setAdjusting(adjusting === id ? null : id)}>Ajustar</Button>
+                    )}
+                  </div>
+                  {isMentor && adjusting === id && <OverridePanel nodeId={id} label={label} current={data.overrides.get(id)} />}
+                </li>
+              )
+            })}
+          </ol>
+          <GateChest phase={phase} phaseNumber={pi + 1} trail={data} />
+        </section>
+      ))}
+    </main>
+  )
+}
+```
+
+- [ ] **Step 7: Rodar e ver passar**
+
+Run: `npx vitest run src/features/trail/TrailMap.test.tsx src/design 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS; `tsc` sem erros.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/features/trail/TrailMap.tsx src/features/trail/TrailMap.test.tsx src/features/trail/GateChest.tsx src/features/trail/OverridePanel.tsx src/design/ui/PixelIcon.tsx
+git commit -m "feat(trail): trail map with phase chests and mentor override"
+```
+
+---
+
+### Task 16: WeekScreen — **[W1]**
+
+**Files:**
+- Create: `src/features/trail/WeekScreen.tsx`, `src/features/trail/youtube.ts`
+- Test: `src/features/trail/WeekScreen.test.tsx`, `src/features/trail/youtube.test.ts`
+
+**Interfaces:**
+- Consumes: `useProgress`, `useNodeStates`, `useToggleItem` (contrato da Task 13); `NODES`, `PHASES`; `isNodeComplete` (`@/domain/unlock`); `useAuth`; `Badge`, `Card`, `Checkbox`, `ProgressBar` de `@/design/ui`. Mocks: `progressOf`, `nodeStatesOf`, `mutationOf` de `@/test/progressMocks`.
+- Produces: `export function WeekScreen(): JSX.Element` (rota `/trilha/:nodeId`); `youtubeEmbedUrl(url: string): string | null`. Textos usados pelo E2E: checkboxes com o título do item (vídeos: `"Assisti: <título>"`), status `"Semana concluída…"` e link `"Ver a trilha"`.
+
+- [ ] **Step 1: Testes do link do YouTube**
+
+`src/features/trail/youtube.test.ts`:
+```ts
+import { youtubeEmbedUrl } from './youtube'
+
+test('converte links do YouTube para o player sem cookies', () => {
+  expect(youtubeEmbedUrl('https://www.youtube.com/watch?v=ywJw8hjzTig')).toBe('https://www.youtube-nocookie.com/embed/ywJw8hjzTig')
+  expect(youtubeEmbedUrl('https://youtu.be/ywJw8hjzTig')).toBe('https://www.youtube-nocookie.com/embed/ywJw8hjzTig')
+})
+
+test('recusa links inválidos ou de outros sites', () => {
+  expect(youtubeEmbedUrl('não é url')).toBeNull()
+  expect(youtubeEmbedUrl('https://www.youtube.com/watch?v=curto')).toBeNull()
+  expect(youtubeEmbedUrl('https://evil.example/watch?v=ywJw8hjzTig')).toBeNull()
+  expect(youtubeEmbedUrl('javascript:alert(1)')).toBeNull()
+})
+```
+
+- [ ] **Step 2: Testes da tela**
+
+`src/features/trail/WeekScreen.test.tsx`:
+```tsx
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { MemoryRouter, Route, Routes } from 'react-router'
+import { NODES } from '@/content/trail'
+import { mutationOf, nodeStatesOf, progressOf } from '@/test/progressMocks'
+
+vi.mock('@/features/progress/hooks', () => ({ useProgress: vi.fn(), useNodeStates: vi.fn(), useToggleItem: vi.fn() }))
+vi.mock('@/features/auth/AuthProvider', () => ({ useAuth: vi.fn() }))
+
+import { useNodeStates, useProgress, useToggleItem } from '@/features/progress/hooks'
+import { useAuth } from '@/features/auth/AuthProvider'
+import { WeekScreen } from './WeekScreen'
+
+const toggle = vi.fn()
+const W01 = NODES.find((n) => n.id === 'w01')!.items.map((i) => i.id)
+
+function asRole(role: 'aluna' | 'mentor') {
+  vi.mocked(useAuth).mockReturnValue({ session: null, loading: false, signOut: vi.fn(), profile: { id: role, role, name: role } })
+}
+function withDone(done: string[]) {
+  vi.mocked(useProgress).mockReturnValue(progressOf(done))
+  vi.mocked(useNodeStates).mockReturnValue(nodeStatesOf(done))
+}
+function renderWeek(id: string) {
+  return render(
+    <MemoryRouter initialEntries={[`/trilha/${id}`]}>
+      <Routes><Route path="/trilha/:nodeId" element={<WeekScreen />} /></Routes>
+    </MemoryRouter>,
+  )
+}
+
+beforeEach(() => {
+  toggle.mockReset()
+  vi.mocked(useToggleItem).mockReturnValue(mutationOf(toggle))
+  withDone([])
+  asRole('aluna')
+})
+
+test('mostra tema, vídeos embutidos sem cookies e o degrau do medo (RF-20, RF-21)', () => {
+  renderWeek('w01')
+  expect(screen.getByRole('heading', { level: 1, name: 'Semana 1' })).toBeInTheDocument()
+  expect(screen.getByText('Perder o medo de falar')).toBeInTheDocument()
+  const player = screen.getByTitle('Vença o medo de falar em público — Reinaldo Polito')
+  expect(player).toHaveAttribute('src', 'https://www.youtube-nocookie.com/embed/ywJw8hjzTig')
+  expect(screen.getByRole('heading', { name: 'Degrau da escada do medo' })).toBeInTheDocument()
+})
+
+test('marcar vídeo como assistido grava o item', async () => {
+  renderWeek('w01')
+  await userEvent.click(screen.getByRole('checkbox', { name: 'Assisti: Vença o medo de falar em público — Reinaldo Polito' }))
+  expect(toggle).toHaveBeenCalledWith({ itemId: 'w01.video.1', done: true })
+})
+
+test('leitura aponta para o livro na Biblioteca e há atalho de nota (RF-22, RF-23)', () => {
+  renderWeek('w01')
+  expect(screen.getByRole('link', { name: 'Abrir na Biblioteca' })).toHaveAttribute('href', '/biblioteca/carnegie')
+  expect(screen.getByRole('link', { name: 'Criar nota sobre esta semana' })).toHaveAttribute('href', '/caderno/notas/nova?semana=w01')
+})
+
+test('mostra o progresso dos obrigatórios e a conclusão da semana', () => {
+  withDone(W01)
+  renderWeek('w01')
+  expect(screen.getByRole('progressbar', { name: 'Itens obrigatórios da semana' })).toHaveAttribute('aria-valuenow', '100')
+  expect(screen.getByRole('status')).toHaveTextContent('Semana concluída. A semana seguinte já está liberada.')
+  expect(screen.getByRole('link', { name: 'Ver a trilha' })).toHaveAttribute('href', '/trilha')
+})
+
+test('última semana da fase lembra do baú', () => {
+  const f1 = NODES.filter((n) => n.phase === 'f1').flatMap((n) => n.items.map((i) => i.id))
+  withDone(f1)
+  renderWeek('w04')
+  expect(screen.getByRole('status')).toHaveTextContent('Complete o baú da fase')
+})
+
+test('semana bloqueada aberta por URL não mostra itens para a aluna', () => {
+  renderWeek('w09')
+  expect(screen.getByRole('status')).toHaveTextContent('Esta etapa ainda está bloqueada')
+  expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+})
+
+test('mentor vê semana bloqueada com aviso', () => {
+  asRole('mentor')
+  renderWeek('w09')
+  expect(screen.getByText('Bloqueada para a aluna')).toBeInTheDocument()
+  expect(screen.getAllByRole('checkbox').length).toBeGreaterThan(0)
+})
+
+test('id desconhecido mostra mensagem e caminho de volta', () => {
+  renderWeek('w99')
+  expect(screen.getByRole('alert')).toHaveTextContent('Semana não encontrada.')
+  expect(screen.getByRole('link', { name: 'Voltar para a trilha' })).toBeInTheDocument()
+})
+
+test('erro ao desmarcar aparece para a aluna', () => {
+  vi.mocked(useToggleItem).mockReturnValue(mutationOf(toggle, new Error('Só quem marcou este item ou o mentor pode desmarcá-lo.')))
+  renderWeek('w01')
+  expect(screen.getByRole('alert')).toHaveTextContent('Só quem marcou este item ou o mentor pode desmarcá-lo.')
+})
+```
+
+- [ ] **Step 3: Rodar e ver falhar**
+
+Run: `npx vitest run src/features/trail/WeekScreen.test.tsx src/features/trail/youtube.test.ts 2>&1 | tail -15`
+Expected: FAIL — `Failed to resolve import "./WeekScreen"` / `"./youtube"`.
+
+- [ ] **Step 4: Implementar `youtube.ts`**
+
+`src/features/trail/youtube.ts`:
+```ts
+const HOSTS = new Set(['www.youtube.com', 'youtube.com', 'm.youtube.com', 'youtu.be'])
+
+/** RF-21: player sem cookies. Retorna null para qualquer link que não seja um vídeo do YouTube. */
+export function youtubeEmbedUrl(url: string): string | null {
+  let u: URL
+  try { u = new URL(url) } catch { return null }
+  if (u.protocol !== 'https:' || !HOSTS.has(u.hostname)) return null
+  const id = u.hostname === 'youtu.be' ? u.pathname.slice(1) : u.searchParams.get('v')
+  return id && /^[\w-]{11}$/.test(id) ? `https://www.youtube-nocookie.com/embed/${id}` : null
+}
+```
+
+- [ ] **Step 5: Implementar a tela**
+
+`src/features/trail/WeekScreen.tsx`:
+```tsx
+import { Link, useParams } from 'react-router'
+import { NODES, PHASES } from '@/content/trail'
+import type { ItemKind, TrailItem } from '@/content/types'
+import { Badge, Card, Checkbox, ProgressBar } from '@/design/ui'
+import { isNodeComplete } from '@/domain/unlock'
+import { useAuth } from '@/features/auth/AuthProvider'
+import { useNodeStates, useProgress, useToggleItem } from '@/features/progress/hooks'
+import { youtubeEmbedUrl } from './youtube'
+
+const SECTIONS: { kind: ItemKind; title: string }[] = [
+  { kind: 'video', title: 'Vídeos' },
+  { kind: 'reading', title: 'Leitura' },
+  { kind: 'fear', title: 'Degrau da escada do medo' },
+  { kind: 'practice', title: 'Prática' },
+  { kind: 'delivery', title: 'Entrega' },
+]
+
+const linkClass = 'font-bold text-brand underline underline-offset-4'
+
+function ItemRow({ item, checked, onChange }: { item: TrailItem; checked: boolean; onChange: (v: boolean) => void }) {
+  const embed = item.kind === 'video' && item.url ? youtubeEmbedUrl(item.url) : null
+  return (
+    <li className="flex flex-col gap-2">
+      {embed && (
+        <iframe src={embed} title={item.title} loading="lazy" referrerPolicy="strict-origin-when-cross-origin"
+          allow="encrypted-media; picture-in-picture; fullscreen"
+          className="aspect-video w-full rounded-card border border-edge bg-bg" />
+      )}
+      <Checkbox checked={checked} onChange={onChange} label={item.kind === 'video' ? `Assisti: ${item.title}` : item.title} />
+      <div className="flex flex-wrap items-center gap-3 pl-12 text-sm text-muted">
+        {item.minutes !== undefined && <span>{item.minutes} min</span>}
+        {!item.required && <Badge tone="muted">Opcional</Badge>}
+        {item.kind === 'reading' && item.bookId && <Link to={`/biblioteca/${item.bookId}`} className={linkClass}>Abrir na Biblioteca</Link>}
+      </div>
+    </li>
+  )
+}
+
+export function WeekScreen() {
+  const { nodeId } = useParams()
+  const node = NODES.find((n) => n.id === nodeId)
+  const { profile } = useAuth()
+  const progress = useProgress()
+  const trail = useNodeStates()
+  const toggle = useToggleItem()
+
+  if (!node) {
+    return (
+      <main className="mx-auto flex max-w-md flex-col gap-3 p-6">
+        <p role="alert">Semana não encontrada.</p>
+        <Link to="/trilha" className={linkClass}>Voltar para a trilha</Link>
+      </main>
+    )
+  }
+  if (progress.isLoading || trail.isLoading) return <p role="status" className="p-6 text-muted">Carregando a semana…</p>
+  if (!progress.data || !trail.data) {
+    return <p role="alert" className="p-6 text-danger">Não foi possível carregar a semana. Verifique a conexão e recarregue a página.</p>
+  }
+
+  const state = trail.data.states.get(node.id) ?? 'locked'
+  if (state === 'locked' && profile?.role !== 'mentor') {
+    return (
+      <main className="mx-auto flex max-w-md flex-col gap-3 p-6">
+        <p role="status">Esta etapa ainda está bloqueada. Conclua a anterior para liberar.</p>
+        <Link to="/trilha" className={linkClass}>Voltar para a trilha</Link>
+      </main>
+    )
+  }
+
+  const done = progress.data.doneItems
+  const required = node.items.filter((i) => i.required)
+  const doneCount = required.filter((i) => done.has(i.id)).length
+  const phaseIndex = PHASES.findIndex((p) => p.id === node.phase)
+  const phase = PHASES[phaseIndex]
+  const doneMsg = node.phase === 'f4'
+    ? 'Tema concluído.'
+    : phase.nodeIds.at(-1) === node.id
+      ? 'Semana concluída. Complete o baú da fase no mapa para abrir a próxima fase.'
+      : 'Semana concluída. A semana seguinte já está liberada.'
+
+  return (
+    <main className="mx-auto flex max-w-md flex-col gap-6 px-4 pt-6 pb-8">
+      <Link to="/trilha" className="text-sm font-bold text-muted underline underline-offset-4">Voltar para a trilha</Link>
+      <header className="flex flex-col gap-1">
+        <p className="font-bold text-muted">Fase {phaseIndex + 1}: {phase.title}</p>
+        <h1 className="font-display text-5xl leading-none font-black text-brand text-glow">
+          {node.week !== undefined ? `Semana ${node.week}` : node.title}
+        </h1>
+        {node.week !== undefined && <p className="text-xl font-bold">{node.title}</p>}
+        {state === 'locked' && <span className="self-start"><Badge tone="muted">Bloqueada para a aluna</Badge></span>}
+      </header>
+      <div className="flex flex-col gap-1">
+        <ProgressBar value={required.length ? doneCount / required.length : 1} label="Itens obrigatórios da semana" tone={node.phase} />
+        <p className="text-sm text-muted">{doneCount} de {required.length} obrigatórios</p>
+      </div>
+      {isNodeComplete(node, done) && (
+        <Card className="flex flex-col gap-2 border-brand">
+          <p role="status" className="font-bold">{doneMsg}</p>
+          <Link to="/trilha" className={linkClass}>Ver a trilha</Link>
+        </Card>
+      )}
+      {SECTIONS.map(({ kind, title }) => {
+        const items = node.items.filter((i) => i.kind === kind)
+        if (items.length === 0) return null
+        return (
+          <section key={kind} aria-labelledby={`sec-${kind}`} className="flex flex-col gap-3">
+            <h2 id={`sec-${kind}`} className="text-lg font-bold">{title}</h2>
+            <ul className="flex flex-col gap-4">
+              {items.map((item) => (
+                <ItemRow key={item.id} item={item} checked={done.has(item.id)}
+                  onChange={(checked) => toggle.mutate({ itemId: item.id, done: checked })} />
+              ))}
+            </ul>
+          </section>
+        )
+      })}
+      {toggle.error && <p role="alert" className="text-danger">{toggle.error.message}</p>}
+      <Link to={`/caderno/notas/nova?semana=${node.id}`} className={linkClass}>Criar nota sobre esta semana</Link>
+    </main>
+  )
+}
+```
+
+- [ ] **Step 6: Rodar e ver passar**
+
+Run: `npx vitest run src/features/trail/WeekScreen.test.tsx src/features/trail/youtube.test.ts 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS; `tsc` sem erros.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/features/trail/WeekScreen.tsx src/features/trail/WeekScreen.test.tsx src/features/trail/youtube.ts src/features/trail/youtube.test.ts
+git commit -m "feat(trail): week screen with embedded videos and item checklist"
+```
+
+---
+
+### Task 17: TodayScreen — **[W1]**
+
+**Files:**
+- Create: `src/features/today/TodayScreen.tsx`
+- Test: `src/features/today/TodayScreen.test.tsx`
+
+**Interfaces:**
+- Consumes: `useNodeStates`, `useProgress`, `useJournalDays`, `useToggleItem` (contrato da Task 13); `dailyRoutine`, `routineItemId`, `RoutineItem` (Task 13); `currentStreak` (`@/domain/streak`); `spDate`, `TZ` (`@/lib/dates`); `Badge`, `Card`, `Checkbox`, `ProgressBar`. Mocks de `@/test/progressMocks`.
+- Produces: `export function TodayScreen(): JSX.Element` (rota `/`). O `h1` é `"Hoje"` (o E2E espera por ele depois do login).
+
+- [ ] **Step 1: Testes**
+
+`src/features/today/TodayScreen.test.tsx`:
+```tsx
+import { render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { MemoryRouter } from 'react-router'
+import { NODES } from '@/content/trail'
+import { mutationOf, nodeStatesOf, progressOf, queryOf } from '@/test/progressMocks'
+
+vi.mock('@/features/progress/hooks', () => ({
+  useNodeStates: vi.fn(), useProgress: vi.fn(), useJournalDays: vi.fn(), useToggleItem: vi.fn(),
+}))
+
+import { useJournalDays, useNodeStates, useProgress, useToggleItem } from '@/features/progress/hooks'
+import { TodayScreen } from './TodayScreen'
+
+const toggle = vi.fn()
+
+function setup({ done = [] as string[], journal = [] as string[] } = {}) {
+  vi.mocked(useNodeStates).mockReturnValue(nodeStatesOf(done))
+  vi.mocked(useProgress).mockReturnValue(progressOf(done))
+  vi.mocked(useJournalDays).mockReturnValue(queryOf<ReadonlySet<string>>(new Set(journal)))
+  vi.mocked(useToggleItem).mockReturnValue(mutationOf(toggle))
+  return render(<MemoryRouter><TodayScreen /></MemoryRouter>)
+}
+const routine = () => within(screen.getByRole('list')).getAllByRole('listitem')
+
+beforeEach(() => {
+  toggle.mockReset()
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2026-09-29T15:00:00Z')) // terça, 12:00 em SP
+})
+afterEach(() => vi.useRealTimers())
+
+test('rotina de terça com caderno fixado no topo (RF-30)', () => {
+  setup()
+  expect(screen.getByRole('heading', { level: 1, name: 'Hoje' })).toBeInTheDocument()
+  expect(routine()).toHaveLength(7)
+  expect(routine()[0]).toHaveTextContent('Caderno: 3 linhas (3 min)')
+  expect(routine()[0]).toHaveTextContent('Obrigatório')
+  expect(screen.getByRole('checkbox', { name: 'Leitura em voz alta (5 min)' })).toBeInTheDocument()
+  expect(screen.queryByRole('checkbox', { name: /Simulado chefe/ })).not.toBeInTheDocument()
+})
+
+test('caderno preenchido vai para o fim e o streak aparece (RF-32)', () => {
+  setup({ journal: ['2026-09-27', '2026-09-28', '2026-09-29'] })
+  expect(routine().at(-1)).toHaveTextContent('Feito')
+  expect(screen.getByText('3 dias seguidos')).toBeInTheDocument()
+})
+
+test('sem caderno recente o streak convida a começar', () => {
+  setup()
+  expect(screen.getByText('Sequência começa hoje')).toBeInTheDocument()
+})
+
+test('marcar item da rotina grava com o id do dia', async () => {
+  setup()
+  await userEvent.click(screen.getByRole('checkbox', { name: 'Aquecimento de voz + pitch de 30 s (5 min)' }))
+  expect(toggle).toHaveBeenCalledWith({ itemId: 'day.2026-09-29.voz', done: true })
+})
+
+test('23:30 em SP ainda é o mesmo dia, mesmo com o relógio em UTC', async () => {
+  vi.setSystemTime(new Date('2026-09-30T02:30:00Z'))
+  setup()
+  await userEvent.click(screen.getByRole('checkbox', { name: 'Aquecimento de voz + pitch de 30 s (5 min)' }))
+  expect(toggle).toHaveBeenCalledWith({ itemId: 'day.2026-09-29.voz', done: true })
+})
+
+test('item já marcado hoje aparece marcado', () => {
+  setup({ done: ['day.2026-09-29.leitura', 'day.2026-09-28.voz'] })
+  expect(screen.getByRole('checkbox', { name: 'Leitura ou audiolivro (20 min)' })).toBeChecked()
+  expect(screen.getByRole('checkbox', { name: 'Aquecimento de voz + pitch de 30 s (5 min)' })).not.toBeChecked()
+})
+
+test('sábado tem simulado chefe e domingo tem revisão (RF-31)', () => {
+  vi.setSystemTime(new Date('2026-10-03T15:00:00Z'))
+  const { unmount } = setup()
+  expect(screen.getByRole('checkbox', { name: 'Simulado chefe (10 min)' })).toBeInTheDocument()
+  unmount()
+  vi.setSystemTime(new Date('2026-10-04T15:00:00Z'))
+  setup()
+  expect(screen.getByRole('checkbox', { name: 'Revisão da semana (30 min)' })).toBeInTheDocument()
+})
+
+test('mostra o próximo item pendente da trilha (RF-32)', () => {
+  setup()
+  expect(screen.getByText(NODES[0].items[0].title)).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Abrir Semana 1' })).toHaveAttribute('href', '/trilha/w01')
+})
+
+test('na Fase 2 o desafio vira abordagem real com a regra 70/30', () => {
+  const f1 = NODES.filter((n) => n.phase === 'f1').flatMap((n) => n.items.map((i) => i.id))
+  setup({ done: [...f1, 'f1.gate.2', 'f1.gate.3', 'f1.gate.4', 'f1.gate.5'] })
+  expect(screen.getByRole('checkbox', { name: '1 abordagem real (10 min)' })).toBeInTheDocument()
+  expect(screen.getAllByText(/Regra 70\/30/)).toHaveLength(2)
+})
+```
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/features/today 2>&1 | tail -15`
+Expected: FAIL — `Failed to resolve import "./TodayScreen"`.
+
+- [ ] **Step 3: Implementar**
+
+`src/features/today/TodayScreen.tsx`:
+```tsx
+import { Link } from 'react-router'
+import { Badge, Card, Checkbox, ProgressBar } from '@/design/ui'
+import { dailyRoutine, routineItemId, type RoutineItem } from '@/domain/routine'
+import { currentStreak } from '@/domain/streak'
+import { useJournalDays, useNodeStates, useProgress, useToggleItem } from '@/features/progress/hooks'
+import { spDate, TZ } from '@/lib/dates'
+
+const longDate = new Intl.DateTimeFormat('pt-BR', { timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long' })
+const withMinutes = (i: RoutineItem) => (i.minutes ? `${i.label} (${i.minutes} min)` : i.label)
+
+export function TodayScreen() {
+  const now = new Date()
+  const today = spDate(now)
+  const trail = useNodeStates()
+  const progress = useProgress()
+  const journal = useJournalDays()
+  const toggle = useToggleItem()
+
+  if (trail.isLoading || progress.isLoading || journal.isLoading) {
+    return <p role="status" className="p-6 text-muted">Carregando o seu dia…</p>
+  }
+  if (!trail.data || !progress.data || !journal.data) {
+    return <p role="alert" className="p-6 text-danger">Não foi possível carregar o seu dia. Verifique a conexão e recarregue a página.</p>
+  }
+
+  const doneItems = progress.data.doneItems
+  const journalDays = journal.data
+  const journalDone = journalDays.has(today)
+  const items = dailyRoutine(today, trail.data.currentPhase, journalDone)
+  const isDone = (i: RoutineItem) => (i.key === 'caderno' ? journalDone : doneItems.has(routineItemId(today, i.key)))
+  const doneCount = items.filter(isDone).length
+  const streak = currentStreak(journalDays, today)
+  const next = trail.data.next
+
+  return (
+    <main className="mx-auto flex max-w-md flex-col gap-6 px-4 pt-6 pb-8">
+      <header className="flex items-end justify-between gap-3">
+        <div>
+          <p className="font-bold text-muted first-letter:uppercase">{longDate.format(now)}</p>
+          <h1 className="font-display text-6xl leading-none font-black text-brand text-glow">Hoje</h1>
+        </div>
+        <Badge tone={streak > 0 ? 'streak' : 'muted'}>
+          {streak === 0 ? 'Sequência começa hoje' : `${streak} ${streak === 1 ? 'dia seguido' : 'dias seguidos'}`}
+        </Badge>
+      </header>
+
+      <Card>
+        {next ? (
+          <>
+            <p className="text-sm font-bold text-muted">Próximo da trilha</p>
+            <p className="mt-1 text-lg font-bold">{next.item.title}</p>
+            <Link to={`/trilha/${next.node.id}`} className="mt-2 inline-block font-bold text-brand underline underline-offset-4">
+              Abrir {next.node.week !== undefined ? `Semana ${next.node.week}` : next.node.title}
+            </Link>
+          </>
+        ) : (
+          <p className="font-bold">Você está em dia com a trilha.</p>
+        )}
+      </Card>
+
+      <section aria-labelledby="rotina" className="flex flex-col gap-3">
+        <h2 id="rotina" className="text-lg font-bold">Rotina de hoje</h2>
+        <ProgressBar value={doneCount / items.length} label="Rotina de hoje" />
+        <ul className="flex flex-col gap-1">
+          {items.map((item) => (
+            <li key={item.key} className="flex flex-col">
+              {item.key === 'caderno' ? (
+                <Link to="/caderno"
+                  className={`flex min-h-12 items-center justify-between gap-3 rounded-control border-2 px-3 font-bold
+                    focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-ink
+                    ${journalDone ? 'border-edge text-muted' : 'border-streak bg-surface'}`}>
+                  <span>{withMinutes(item)}</span>
+                  <Badge tone={journalDone ? 'success' : 'streak'}>{journalDone ? 'Feito' : 'Obrigatório'}</Badge>
+                </Link>
+              ) : (
+                <Checkbox checked={isDone(item)} label={withMinutes(item)}
+                  onChange={(checked) => toggle.mutate({ itemId: routineItemId(today, item.key), done: checked })} />
+              )}
+              {item.hint && <p className="pl-12 text-sm text-muted">{item.hint}</p>}
+            </li>
+          ))}
+        </ul>
+        {toggle.error && <p role="alert" className="text-danger">{toggle.error.message}</p>}
+      </section>
+    </main>
+  )
+}
+```
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npx vitest run src/features/today 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS; `tsc` sem erros.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/features/today
+git commit -m "feat(today): daily routine, streak and next trail item"
+```
+
+---
+
+### Task 18: AppShell e rotas autenticadas — **[W4]**
+
+**Files:**
+- Create: `src/features/shell/AppShell.tsx`
+- Modify: `src/App.tsx` (troca o `HomePlaceholder` pelas rotas da E4), `src/App.test.tsx` (novo caso)
+- Test: `src/features/shell/AppShell.test.tsx`
+
+**Interfaces:**
+- Consumes: `TrailMap` (Task 15), `WeekScreen` (Task 16), `TodayScreen` (Task 17), `RequireAuth` (Task 12), `BottomNav`, `PixelIcon`.
+- Produces: rotas `/` (Hoje), `/trilha`, `/trilha/:nodeId` dentro do `AppShell` com a `BottomNav` (abas "Hoje" e "Trilha"; E5 e E6 acrescentam "Simulados" e "Caderno" no array `NAV`).
+
+- [ ] **Step 1: Testes**
+
+`src/features/shell/AppShell.test.tsx`:
+```tsx
+import { render, screen } from '@testing-library/react'
+import { MemoryRouter, Route, Routes } from 'react-router'
+import { AppShell } from './AppShell'
+
+function renderAt(path: string) {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <Routes>
+        <Route element={<AppShell />}>
+          <Route index element={<h1>Tela hoje</h1>} />
+          <Route path="trilha" element={<h1>Tela trilha</h1>} />
+          <Route path="trilha/:nodeId" element={<h1>Tela semana</h1>} />
+        </Route>
+      </Routes>
+    </MemoryRouter>,
+  )
+}
+
+test('mostra a tela atual e a navegação com a aba ativa', () => {
+  renderAt('/')
+  expect(screen.getByRole('heading', { name: 'Tela hoje' })).toBeInTheDocument()
+  expect(screen.getByRole('navigation', { name: 'Principal' })).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Hoje' })).toHaveAttribute('aria-current', 'page')
+})
+
+test('aba Trilha continua ativa dentro de uma semana', () => {
+  renderAt('/trilha/w05')
+  expect(screen.getByRole('heading', { name: 'Tela semana' })).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Trilha' })).toHaveAttribute('aria-current', 'page')
+  expect(screen.getByRole('link', { name: 'Hoje' })).not.toHaveAttribute('aria-current')
+})
+```
+
+Em `src/App.test.tsx`, acrescentar no fim (o mock de `@/lib/supabase` do arquivo já devolve sessão vazia):
+```tsx
+test('rotas da trilha exigem login', async () => {
+  render(<MemoryRouter initialEntries={['/trilha/w01']}><AuthProvider><AppRoutes /></AuthProvider></MemoryRouter>)
+  expect(await screen.findByRole('heading', { name: 'Entrar' })).toBeInTheDocument()
+})
+```
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/features/shell src/App.test.tsx 2>&1 | tail -15`
+Expected: FAIL — `Failed to resolve import "./AppShell"` (o teste novo do App pode passar já, pelo catch-all; ele protege a mudança do Step 4).
+
+- [ ] **Step 3: Implementar o shell**
+
+`src/features/shell/AppShell.tsx`:
+```tsx
+import { Outlet } from 'react-router'
+import { BottomNav, PixelIcon } from '@/design/ui'
+
+// E5 acrescenta "Simulados" e E6 acrescenta "Caderno".
+const NAV = [
+  { to: '/', label: 'Hoje', icon: <PixelIcon name="today" /> },
+  { to: '/trilha', label: 'Trilha', icon: <PixelIcon name="trail" /> },
+]
+
+export function AppShell() {
+  return (
+    <div className="min-h-dvh pb-28">
+      <Outlet />
+      <BottomNav items={NAV} />
+    </div>
+  )
+}
+```
+
+- [ ] **Step 4: Ligar as rotas**
+
+`src/App.tsx` (substitui o arquivo inteiro):
+```tsx
+import { lazy, Suspense } from 'react'
+import { Routes, Route, Navigate } from 'react-router'
+import { LoginScreen } from './features/auth/LoginScreen'
+import { RequireAuth } from './features/auth/RequireAuth'
+import { AppShell } from './features/shell/AppShell'
+import { TodayScreen } from './features/today/TodayScreen'
+import { TrailMap } from './features/trail/TrailMap'
+import { WeekScreen } from './features/trail/WeekScreen'
+
+const UiPreview = lazy(() => import('./design/UiPreview'))
+
+export function AppRoutes() {
+  return (
+    <Routes>
+      <Route path="/login" element={<LoginScreen />} />
+      {import.meta.env.DEV && <Route path="/ui" element={<Suspense><UiPreview /></Suspense>} />}
+      <Route element={<RequireAuth><AppShell /></RequireAuth>}>
+        <Route index element={<TodayScreen />} />
+        <Route path="trilha" element={<TrailMap />} />
+        <Route path="trilha/:nodeId" element={<WeekScreen />} />
+      </Route>
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  )
+}
+```
+
+- [ ] **Step 5: Rodar tudo**
+
+Run: `npm test 2>&1 | tail -8 && npm run build 2>&1 | tail -5`
+Expected: todos os testes PASS; build ok.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/features/shell src/App.tsx src/App.test.tsx
+git commit -m "feat(app): authenticated shell with bottom nav and trail routes"
+```
+
+---
+
+### Task 19: E2E — concluir semana → próxima liberada — **[W4]**
+
+**Files:**
+- Create: `playwright.config.ts`, `e2e/support.ts`, `e2e/trail.spec.ts`
+- Modify: `package.json` (dev dependency + script `e2e`), `.gitignore`, `supabase/config.toml` (`site_url` e redirects do dev server)
+
+**Interfaces:**
+- Consumes: app rodando em `http://localhost:5173` (dev server já existente ou subido pelo Playwright); Supabase local (API `http://127.0.0.1:55321`); rótulos das Tasks 15–17 (`"Semana N, <estado>"`, checkboxes da semana, `"Semana concluída"`, link `"Ver a trilha"`, `h1 "Hoje"`, aba `"Trilha"`).
+- Produces: `npm run e2e`.
+
+> **Atenção:** o E2E **apaga todo o progresso e os overrides do banco LOCAL** antes de rodar. `e2e/support.ts` se recusa a rodar contra qualquer URL que não seja `localhost`/`127.0.0.1`.
+
+- [ ] **Step 1: Instalar o Playwright**
+
+Run: `npm i -D @playwright/test@^1.63.0 && npx playwright install chromium 2>&1 | tail -2`
+Expected: pacote em `devDependencies`; Chromium baixado.
+
+Em `package.json` → `scripts`, acrescentar: `"e2e": "playwright test"`. Em `.gitignore`, acrescentar:
+```
+test-results/
+playwright-report/
+```
+
+- [ ] **Step 2: Configuração e apoio**
+
+`playwright.config.ts`:
+```ts
+import { defineConfig, devices } from '@playwright/test'
+
+export default defineConfig({
+  testDir: 'e2e',
+  timeout: 60_000,
+  use: { baseURL: 'http://localhost:5173', trace: 'retain-on-failure' },
+  projects: [{ name: 'mobile', use: { ...devices['Pixel 7'] } }],
+  webServer: { command: 'npm run dev', url: 'http://localhost:5173', reuseExistingServer: true },
+})
+```
+
+`e2e/support.ts`:
+```ts
+import { createClient } from '@supabase/supabase-js'
+import type { Page } from '@playwright/test'
+
+const url = process.env.API_URL ?? 'http://127.0.0.1:55321'
+const serviceKey = process.env.SERVICE_ROLE_KEY
+if (!serviceKey) throw new Error('Defina SERVICE_ROLE_KEY: set -a; eval "$(npx supabase status -o env)"; set +a')
+if (!/^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(url)) throw new Error(`E2E só roda contra o Supabase local, não contra ${url}`)
+
+const admin = createClient(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } })
+
+/** E-mail da conta aluna local; cria uma conta de teste se ainda não existir. */
+export async function studentEmail(): Promise<string> {
+  const { data: existing, error } = await admin.from('profiles').select('id').eq('role', 'aluna').maybeSingle()
+  if (error) throw error
+  if (existing) {
+    const { data, error: userError } = await admin.auth.admin.getUserById(existing.id)
+    if (userError || !data.user.email) throw userError ?? new Error('Conta aluna sem e-mail')
+    return data.user.email
+  }
+  const email = 'aluna.e2e@trilha.test'
+  const { data, error: createError } = await admin.auth.admin.createUser({ email, email_confirm: true })
+  if (createError) throw createError
+  const { error: profileError } = await admin.from('profiles').insert({ id: data.user.id, role: 'aluna', name: 'Aluna E2E' })
+  if (profileError) throw profileError
+  return email
+}
+
+/** Zera progresso e overrides do banco local. */
+export async function resetProgress(): Promise<void> {
+  const a = await admin.from('item_progress').delete().neq('item_id', '')
+  if (a.error) throw a.error
+  const b = await admin.from('node_overrides').delete().neq('node_id', '')
+  if (b.error) throw b.error
+}
+
+/** Login por magic link gerado pelo admin (sem abrir e-mail). */
+export async function signIn(page: Page, email: string): Promise<void> {
+  const { data, error } = await admin.auth.admin.generateLink({
+    type: 'magiclink', email, options: { redirectTo: 'http://localhost:5173/' },
+  })
+  if (error) throw error
+  await page.goto(data.properties.action_link)
+  await page.waitForURL(/^http:\/\/localhost:5173\//)
+}
+```
+
+- [ ] **Step 3: O teste**
+
+`e2e/trail.spec.ts`:
+```ts
+import { expect, test } from '@playwright/test'
+import { resetProgress, signIn, studentEmail } from './support'
+
+test.beforeEach(async ({ page }) => {
+  await resetProgress()
+  await page.route(/youtube-nocookie\.com/, (route) => route.abort())
+  await signIn(page, await studentEmail())
+})
+
+test('concluir a semana 1 libera a semana 2', async ({ page }) => {
+  await expect(page.getByRole('heading', { level: 1, name: 'Hoje' })).toBeVisible()
+  await page.getByRole('link', { name: 'Trilha', exact: true }).click()
+
+  await expect(page.getByRole('button', { name: 'Semana 2, bloqueada' })).toBeDisabled()
+  await page.getByRole('button', { name: 'Semana 1, disponível' }).click()
+  await expect(page).toHaveURL(/\/trilha\/w01$/)
+
+  const boxes = page.getByRole('checkbox')
+  const count = await boxes.count()
+  for (let i = 0; i < count; i++) await boxes.nth(i).check()
+  await expect(page.getByText('Semana concluída')).toBeVisible()
+
+  await page.getByRole('link', { name: 'Ver a trilha' }).click()
+  await expect(page.getByRole('button', { name: 'Semana 1, concluída' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Semana 2, disponível' })).toBeEnabled()
+
+  await page.reload()
+  await expect(page.getByRole('button', { name: 'Semana 2, disponível' })).toBeEnabled()
+})
+```
+
+- [ ] **Step 4: Rodar e ver falhar**
+
+Run: `set -a; eval "$(npx supabase status -o env)"; set +a; npx playwright test 2>&1 | tail -15`
+Expected: FAIL em `signIn` → `waitForURL` estoura o tempo, porque o `supabase/config.toml` ainda redireciona para `http://127.0.0.1:3000` (o `redirectTo` do dev server não está na lista permitida). Se as variáveis tiverem outros nomes na sua versão do CLI (`npx supabase status -o env`), exporte `API_URL` e `SERVICE_ROLE_KEY` à mão.
+
+- [ ] **Step 5: Liberar o redirect do dev server**
+
+Em `supabase/config.toml`, seção `[auth]`:
+```toml
+site_url = "http://localhost:5173"
+additional_redirect_urls = ["http://localhost:5173/**", "http://127.0.0.1:5173/**"]
+```
+Run: `npx supabase stop && npx supabase start 2>&1 | tail -3`
+Expected: Supabase local de volta nas portas 553xx. (Isso também conserta o magic link do `LoginScreen` em dev, que usa `window.location.origin`.)
+
+- [ ] **Step 6: Rodar e ver passar**
+
+Run: `set -a; eval "$(npx supabase status -o env)"; set +a; npx playwright test 2>&1 | tail -8`
+Expected: `1 passed`.
+
+- [ ] **Step 7: Verificação final da etapa**
+
+Run: `npm test 2>&1 | tail -6 && npx supabase test db 2>&1 | tail -4 && npm run build 2>&1 | tail -4 && npm run lint 2>&1 | tail -4`
+Expected: tudo verde.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add playwright.config.ts e2e package.json package-lock.json .gitignore supabase/config.toml
+git commit -m "test(e2e): completing a week unlocks the next one"
+```
+
+---
+
+## Cobertura dos RFs da E4
+
+| RF | Onde |
+|---|---|
+| RF-10, RF-11 (mapa por fase, 3 estados) | Task 15 |
+| RF-12, RF-16 (regra de semana, sem trava de tempo) | `computeNodeStates` (Task 6) via `buildTrailState` (Task 13); E2E (Task 19) |
+| RF-13 (portão/baú) | Task 13 (`gateDoneSet`) + Task 15 (`GateChest`) |
+| RF-14 (Fase 4 aberta, 1 tema por mês) | Task 6 (regra) + Task 15 (aviso) |
+| RF-15 (override com quem/quando) | Task 14 (`useSetOverride`) + Task 15 (`OverridePanel`) |
+| RF-20–23 (tela da semana) | Task 16 |
+| RF-30–32 (Hoje, rotina, streak, próximo item) | Task 13 (`routine`, `next`) + Task 17 |
+| RF-40 (itens de fase automáticos) | Task 13 (`gateDoneSet`; itens de simulado recebem dados na E5) |
+| RF-41 (mentor desmarca) | RLS (Task 5) + erro legível (Task 14/16) |
+| RF-42 (checklists manuais) | **E6** (`ChecklistEditor`), como no roteiro |
+
+## Após a Parte 3
+
+Com as Tasks 13–19 verdes, a E4 está concluída. Próximo passo: detalhar **E5 — Simulados** (nova "Parte 4"), incluindo passar os dados reais de simulados para `buildTrailState` (substituindo `NO_SIMULATIONS` em `useNodeStates`) e acrescentar a aba "Simulados" em `AppShell`.
