@@ -109,3 +109,14 @@ test('useJournalDays lista só os dias com caderno completo', async () => {
   await waitFor(() => expect(result.current.data?.has('2026-09-29')).toBe(true))
   expect(calls).toContainEqual({ table: 'journal_entries', method: 'eq', args: ['complete', true] })
 })
+
+test('simulados avaliados alimentam os itens automáticos do portão da Fase 2 (E5)', async () => {
+  results.item_progress = [{ data: [], error: null }]
+  results.node_overrides = [{ data: [], error: null }]
+  results.v_simulation_results = [{ data: [{ objective_id: 'obj-01', phase: 'f2', difficulty: 'medio', total_official: '16.0' }], error: null }]
+  results.reel_items = [{ data: [{ id: 'obj-01' }], error: null }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useNodeStates(), { wrapper: Wrapper })
+  await waitFor(() => expect(result.current.data?.gateDone.has('f2.gate.4')).toBe(true))
+  expect(result.current.data!.gateDone.has('f2.gate.2')).toBe(true)
+})

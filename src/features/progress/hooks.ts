@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { supabase } from '@/lib/supabase'
 import { buildTrailState, type NodeOverride } from '@/domain/trailState'
+import { FACTS_KEY, fetchSimulationFacts } from '@/features/simulations/facts'
 import type { NodeStatesResult, ProgressData, SetOverrideVars, ToggleItemVars } from './types'
 
 const PROGRESS = ['item_progress'] as const
@@ -32,11 +33,13 @@ export function useProgress() {
 export function useNodeStates(): NodeStatesResult {
   const progress = useProgress()
   const overrides = useQuery({ queryKey: OVERRIDES, queryFn: fetchOverrides })
+  // E5: os simulados avaliados alimentam os itens automáticos do portão. Se a consulta falhar, cai em NO_SIMULATIONS.
+  const facts = useQuery({ queryKey: FACTS_KEY, queryFn: fetchSimulationFacts, retry: 1 })
   const data = useMemo(
-    () => (progress.data && overrides.data ? buildTrailState(progress.data.doneItems, overrides.data) : undefined),
-    [progress.data, overrides.data],
+    () => (progress.data && overrides.data ? buildTrailState(progress.data.doneItems, overrides.data, facts.data) : undefined),
+    [progress.data, overrides.data, facts.data],
   )
-  return { data, isLoading: progress.isLoading || overrides.isLoading, error: progress.error ?? overrides.error ?? null }
+  return { data, isLoading: progress.isLoading || overrides.isLoading || facts.isLoading, error: progress.error ?? overrides.error ?? null }
 }
 
 export function useToggleItem() {
