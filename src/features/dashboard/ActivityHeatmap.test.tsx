@@ -53,3 +53,10 @@ test('sem atividade: só a mensagem, sem lista (Review Focus 4)', () => {
   expect(screen.getByText('Nenhuma atividade no período.')).toBeVisible()
   expect(screen.queryByText('Ver os dias em lista')).not.toBeInTheDocument()
 })
+
+test('a grade divide a largura entre as semanas: a semana atual nunca fica escondida por rolagem lateral', () => {
+  const { container } = render(<ActivityHeatmap weeks={heatmapWeeks([], '2026-09-30', 20)} />)
+  const grid = container.querySelector('[data-kind]')!.parentElement!
+  expect(grid.style.gridTemplateColumns).toBe('repeat(20, minmax(0, 1fr))')
+  expect(container.querySelector('.overflow-x-auto')).toBeNull()
+})

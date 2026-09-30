@@ -24,7 +24,7 @@ export function CriteriaRadar({ points }: { points: RadarPoint[] }) {
           <RadarChart data={data} outerRadius="70%">
             <PolarGrid stroke={CHART.grid} />
             <PolarAngleAxis dataKey="label" tick={TICK} />
-            <PolarRadiusAxis angle={90} domain={[0, 5]} tickCount={6} tick={TICK} stroke={CHART.axis} />
+            <PolarRadiusAxis angle={90} domain={[0, 5]} tickCount={6} tick={false} axisLine={false} />
             <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v) => formatScore(Number(v))} />
             <Legend wrapperStyle={{ color: CHART.text, fontSize: 12 }} />
             {hasPrevious && (

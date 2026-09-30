@@ -32,12 +32,11 @@ export function ActivityHeatmap({ weeks }: { weeks: HeatCell[][] }) {
       <Card className="flex flex-col gap-3">
         <h2 id={id} className="text-lg font-bold">Atividade</h2>
         <p className="text-sm text-muted">{summary.text}</p>
-        <div aria-hidden className="overflow-x-auto pb-1">
-          <div className="grid w-max grid-flow-col grid-rows-7 gap-[3px]">
-            {weeks.flat().map((c) => (
-              <span key={c.date} data-kind={c.kind} title={shortDate(c.date)} className={`size-3 rounded-[2px] ${CELL[c.kind]}`} />
-            ))}
-          </div>
+        {/* Colunas fluidas: as semanas mais recentes (à direita) sempre cabem na tela, sem rolagem lateral. */}
+        <div aria-hidden className="grid grid-flow-col grid-rows-7 gap-[3px]" style={{ gridTemplateColumns: `repeat(${weeks.length}, minmax(0, 1fr))` }}>
+          {weeks.flat().map((c) => (
+            <span key={c.date} data-kind={c.kind} title={shortDate(c.date)} className={`aspect-square w-full rounded-[2px] ${CELL[c.kind]}`} />
+          ))}
         </div>
         <ul aria-label="Legenda" className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
           <li className="flex items-center gap-1.5"><span aria-hidden className={`size-3 rounded-[2px] ${CELL.journal}`} />Com caderno</li>
