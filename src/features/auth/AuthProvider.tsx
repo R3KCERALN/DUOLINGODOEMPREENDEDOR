@@ -33,6 +33,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null)
   const [profile, setProfile] = useState<Profile | null>(null)
   const [loading, setLoading] = useState(true)
+  const [prevSession, setPrevSession] = useState<Session | null>(null)
+
+  // Sessão nova: zera o perfil durante o render (padrão do React para estado que depende de outro), não num efeito.
+  if (session !== prevSession) {
+    setPrevSession(session)
+    if (!session) setProfile(null)
+    else {
+      // Sem internet, o supabase-js tenta de novo por ~7 s antes de desistir: abre já com o perfil guardado.
+      const cached = navigator.onLine ? null : readCachedProfile(session.user.id)
+      setProfile(cached)
+      setLoading(!cached)
+    }
+  }
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -44,16 +57,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   useEffect(() => {
-    if (!session) { setProfile(null); return }
-    // Sem internet, o supabase-js tenta de novo por ~7 s antes de desistir: abre já com o perfil guardado.
-    const cached = navigator.onLine ? null : readCachedProfile(session.user.id)
-    setProfile(cached)
-    setLoading(!cached)
-    supabase.from('profiles').select('id, role, name').eq('id', session.user.id).single()
+    if (!session) return
+    const userId = session.user.id
+    supabase.from('profiles').select('id, role, name').eq('id', userId).single()
       .then(({ data }) => {
         const fresh = data as Profile | null
         if (fresh) writeCachedProfile(fresh)
-        setProfile(fresh ?? readCachedProfile(session.user.id))
+        setProfile(fresh ?? readCachedProfile(userId))
         setLoading(false)
       })
   }, [session])
@@ -63,6 +73,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   return <AuthContext.Provider value={{ session, profile, loading, signOut }}>{children}</AuthContext.Provider>
 }
 
+// O hook do contexto fica junto do provider (padrão do React); separar mudaria 25 imports e os mocks dos testes.
+// oxlint-disable-next-line react/only-export-components
 export function useAuth(): AuthState {
   const ctx = useContext(AuthContext)
   if (!ctx) throw new Error('useAuth fora do AuthProvider')

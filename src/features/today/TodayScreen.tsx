@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Link } from 'react-router'
 import { Badge, Card, Checkbox, ProgressBar } from '@/design/ui'
 import { yesterdayNotice } from '@/domain/journalDays'
@@ -11,7 +12,7 @@ const longDate = new Intl.DateTimeFormat('pt-BR', { timeZone: TZ, weekday: 'long
 const withMinutes = (i: RoutineItem) => (i.minutes ? `${i.label} (${i.minutes} min)` : i.label)
 
 export function TodayScreen() {
-  const now = new Date()
+  const [now] = useState(() => new Date())
   const today = spDate(now)
   const trail = useNodeStates()
   const progress = useProgress()
