@@ -12143,3 +12143,2698 @@ git commit -m "feat(e6): caderno routes, nav tab, yesterday notice and journal e
 ## Após a Parte 5
 
 Com as Tasks 33–43 verdes, a E6 está concluída. Ficam fora e registrados: E2E do upload e da retomada do PDF (hoje só a conferência manual da Task 43 e os testes com o `react-pdf` simulado); busca por prefixo (a busca `websearch` em português casa palavras inteiras, com radical); revisão das notas por data. Próximo passo: detalhar **E7 — Painéis** (nova "Parte 6"), reaproveitando `journalCompliance` e `currentStreak` (`src/domain/streak.ts`), `officialScore` e o padrão de hooks isolados.
+
+
+---
+
+# Parte 6 — Plano detalhado: E7 Painéis
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Entregar o painel de desempenho por papel (`/painel`): para o mentor, cabeçalho, evolução das notas com metas 15/22, autoavaliação × mentor, radar dos 6 critérios, mapa de calor, barras de checklist por fase, caderno em dia, treinos, leitura, últimos simulados e uso do Storage; para a aluna, a versão dela (RF-90 a RF-95), sem nada que seja só do mentor.
+
+**Architecture:** Todas as contas, somas e textos ficam em funções puras de `src/domain/dashboard.ts` (testadas, com o fuso `America/Sao_Paulo`); as telas só desenham. O que precisa de agregação no banco vira duas views (`v_score_series`, `v_activity_days`, ambas `security_invoker`, então o RLS de fichas e de atividade continua valendo) e uma RPC só do mentor (`storage_usage()`), todas provadas com pgTAP em uma migration nova. O acesso ao Supabase fica em `src/features/dashboard/hooks.ts` (contrato publicado primeiro, Task 44, para o W4 mockar); o que já existe (`useNodeStates`, `useProgress`, `useJournalDays`, `useJournalEntries`, `useSimulations`, `useBooks`) é reaproveitado. Os gráficos de linha e o radar usam Recharts, sempre dentro de um `ChartFrame` que traz o resumo em texto e a tabela de dados; mapa de calor e barras são HTML/CSS.
+
+**Tech Stack:** o da Parte 1. Recharts 3 já está no Tech Stack, mas **ainda não está no `package.json`** (conferido): a Task 47 instala `recharts@^3`.
+
+**Spec:** `PRD.md` §4.9 (RF-90–98), §4.10 (RF-99, RF-99a), RNF-11 e RNF-04.
+
+## Global Constraints (adicionais às Partes 1–5)
+
+- Rota final `/painel` e aba "Painel" (Task 53). Telas do painel só importam hooks (`@/features/dashboard/hooks`, `progress`, `journal`, `library`, `simulations`), nunca `@/lib/supabase`. Testes de tela começam com `vi.mock('@/lib/supabase', () => ({ supabase: {} }))` e simulam os módulos de hooks; dados de teste vêm de `src/test/dashboardMocks.ts` (novo) e das fábricas existentes (`entryOf`, `bookOf`, `summaryOf`, `nodeStatesOf`, `progressOf`).
+- Fuso de todas as datas: `America/Sao_Paulo`. As views calculam `day` e `week_start` no banco (`timezone('America/Sao_Paulo', …)`); a semana começa na segunda-feira; o cliente nunca agrupa datas pelo fuso do aparelho.
+- "Dia estudado" = caderno completo, no prazo ou com atraso (RF-99, `currentStreak` e `studiedDays`). O mapa de calor mostra toda a atividade, mas os dias com atividade e **sem** caderno completo ganham marca própria (RF-99a). Rascunho de caderno sozinho não é atividade.
+- Notas: metas 15 e 22 valem para o **total** (soma dos 6 critérios, de 6 a 30); o radar usa a média por critério (1 a 5). Só entram simulados com as duas fichas (`v_simulation_official`); treino sem a ficha do mentor não conta (RF-82).
+- Cores dos gráficos só de tokens (`var(--color-…)` em `chartTheme.ts`), nenhum hex nos componentes; gráficos sem animação (`isAnimationActive={false}`, RNF-06); `font-display` só em títulos ≥ 20 px (os títulos dos cartões são `text-lg` em fonte normal).
+- Todo gráfico tem alternativa acessível: resumo em texto visível + tabela dos dados (`ChartFrame`), com o SVG em `aria-hidden`. Nenhuma informação só por cor: séries com traço e marcador diferentes; dia sem caderno com contorno vazado.
+- Painel da aluna = RF-98 (RF-90 a RF-95 dela). Ela **não** recebe: uso do Storage, treinos por semana e pendentes, leitura, caderno em falta detalhado, últimos simulados. Isso vale na tela **e** no banco (`storage_usage()` recusa quem não é o mentor).
+- `package.json` só na Task 47. Migration só na Task 45 (`supabase/migrations/20260930000003_dashboards.sql`; se já existir uma migration com timestamp maior, use um timestamp maior que o último). `src/App.tsx`, `src/features/shell/AppShell.tsx` (e o teste), `src/design/ui/PixelIcon.tsx` e `e2e/` só na Task 53. `src/test/fakeSupabase.ts` não muda.
+
+## Review Focus
+
+1. **"Em falta" cedo demais:** ontem antes das 12:00 (SP) ainda é preenchível e **não** é falta; às 12:00 vira falta; o fuso do aparelho não muda isso; hoje nunca é falta. → `journalOverview` na Task 44 (por isso não reaproveita `journalCompliance`, que conta ontem como falta desde a meia-noite) e tela na Task 50.
+2. **Dado do outro lado vazando para a aluna:** ficha isolada de um dos lados nunca vira ponto de gráfico; a aluna não executa `storage_usage()` nem por API; a tela dela nem chama os hooks do mentor. → pgTAP na Task 45 e teste de tela na Task 52.
+3. **Virada de dia em SP:** 23:30 em SP (02:30Z) conta no dia certo no mapa de calor, na semana das notas e nos treinos por semana; domingo à noite fica na semana de segunda anterior. → Tasks 44 e 45.
+4. **Painel vazio ou com um ponto só:** sem simulados, sem atividade, sem nenhuma entrada de caderno, com uma única semana: nada de gráfico quebrado, "NaN" ou divisão por zero; textos de "ainda não há…". → Tasks 44, 47, 48, 49, 50 e 52.
+5. **Gráfico que só a visão enxerga:** sem alternativa em texto/tabela, com animação, ou com duas séries só na cor. → Tasks 47, 48 e 49.
+
+## Ordem e paralelismo
+
+Os três donos: **W3** (contrato, banco, hooks, rotas e E2E), **W4** (gráficos e telas), **W1/Codex** (uma Task pequena com código pronto).
+
+| Passo | Task | Dono | Depende de | Roda em paralelo com |
+|---|---|---|---|---|
+| 1 | 44 — Contrato e domínio dos painéis | **W3** | E6 concluída (Tasks 33–43) | — |
+| 2 | 45 — Migration: views e RPC + pgTAP | **W3** | migrations anteriores | 46, 47, 48, 49, 50, 51 |
+| 2 | 46 — Hooks dos painéis | **W3** | 44 | 45, 47–51 |
+| 2 | 47 — Recharts, `ChartFrame`, evolução e autoavaliação × mentor | **W4** | 44 | 45, 46, 49 |
+| 2 | 48 — Radar por critério e barras de checklist | **W4** | 44, 47 (`ChartFrame`) | 45, 46, 49 |
+| 2 | 49 — `ActivityHeatmap` | **W1 (Codex)** | 44 | todas |
+| 3 | 50 — Cabeçalho, caderno em dia e uso do Storage | **W4** | 44 | 45, 46 |
+| 3 | 51 — Treinos, leitura e últimos simulados | **W4** | 44 | 45, 46 |
+| 4 | 52 — `DashboardScreen` (composição por papel) | **W4** | 44, 47–51 | 46 |
+| 5 | 53 — Rota, aba "Painel" e E2E | **W3** | 45, 46, 52; Task 43 (E6) | — |
+
+**Arquivos compartilhados (evitar conflito):** `src/domain/dashboard.ts` e `src/features/dashboard/hooks.ts` são do W3 (o hooks.ts é esqueleto na 44 e implementação na 46); as telas do W4 e do W1 não editam nada do W3 e o W3 não edita as telas. Cada componente tem um único dono e o `DashboardScreen` (Task 52) é o único arquivo que junta todos.
+
+**Contrato para mockar:** a partir da Task 44, o W4 escreve os testes de tela contra `vi.mock('./hooks')` e `src/test/dashboardMocks.ts`, sem esperar as Tasks 45 e 46. Componentes das Tasks 47–51 recebem **props** (dados já calculados por `src/domain/dashboard.ts`); só o `DashboardScreen` chama hooks.
+
+## Estrutura de arquivos (criada nesta parte)
+
+```
+supabase/
+├── migrations/20260930000003_dashboards.sql           # T45
+└── tests/dashboards.test.sql                          # T45
+src/
+├── domain/dashboard.ts (+ .test.ts)                   # T44
+├── test/dashboardMocks.ts                             # T44
+└── features/dashboard/
+    ├── types.ts, hooks.ts (esqueleto T44 → T46), contract.test.ts (T44), hooks.test.tsx (T46)
+    ├── chartTheme.ts, ChartFrame.tsx, EvolutionChart.tsx, PerceptionChart.tsx (+ testes)   # T47
+    ├── CriteriaRadar.tsx, ChecklistBars.tsx (+ testes)                                     # T48
+    ├── ActivityHeatmap.tsx (+ teste)                                                       # T49 (W1)
+    ├── DashboardHeader.tsx, JournalCompliance.tsx, StorageCard.tsx (+ testes)              # T50
+    ├── TrainingsPanel.tsx, ReadingProgress.tsx, RecentSimulations.tsx (+ testes)           # T51
+    ├── DashboardScreen.tsx, MentorSections.tsx (+ teste)                                   # T52
+    └── (rota, aba e PixelIcon 'chart' na T53)
+e2e/dashboard.spec.ts                                  # T53
+```
+
+---
+
+### Task 44: Contrato de dados e domínio dos painéis — **[W3]**
+
+**Files:**
+- Create: `src/domain/dashboard.ts`, `src/features/dashboard/types.ts`, `src/features/dashboard/hooks.ts` (esqueleto), `src/test/dashboardMocks.ts`
+- Test: `src/domain/dashboard.test.ts`, `src/features/dashboard/contract.test.ts`
+
+**Interfaces:**
+- Consumes: `NODES`, `PHASES` (`@/content/trail`); `TrailNode`, `PhaseId` (`@/content/types`); `addDays`, `daysBetween`, `spDate` (`@/lib/dates`); `journalDayStatus` (`@/domain/journalDays`); `weekday` (`@/domain/routine`); `average`, `CRITERIA`, `CRITERIA_LABELS`, `Criterion`, `Scores` (`@/domain/scoring`); `currentStreak` (`@/domain/streak`); `Difficulty` (`@/domain/roulette`); `SimMode`, `SimStatus` (`@/domain/simulationState`); `queryOf`, `mutationOf`, `asyncMutationOf` (`@/test/simulationMocks`).
+- Produces (**contrato usado por W3, W4 e W1 — não renomear**):
+  - Tipos de linha (definidos em `dashboard.ts`, reexportados por `features/dashboard/types.ts`): `ScoreRow { simulationId; day; weekStart; mode; difficulty; phase; isBoss; studentTotal; mentorTotal; official; byCriterion: Scores }`, `ActivityDay { day; items; simulations; journal }`, `StorageBucket = 'books' | 'recordings'`, `StorageUsage { bucket; bytes; files }`.
+  - Constantes e formatação: `SCORE_GOALS = { f2: 15, f4: 22 }`, `SCORE_RANGE = { min: 6, max: 30 }`, `STORAGE_LIMIT_BYTES` (1 GiB), `formatScore(n)` ("17,5"), `shortDate(iso)` ("29/09"), `formatBytes(n)`.
+  - Notas (RF-91–93): `WeekPoint { weekStart; avg; count }`, `weeklyOfficial(rows)`; `PerceptionPoint { simulationId; day; student; mentor; gap }`, `selfVsMentor(rows)`, `averageGap(points)`; `RadarPoint { criterion; label; recent; previous }`, `radarByCriterion(rows, today)` (últimos 28 dias × 28 dias anteriores); `evolutionSummary(points)`, `perceptionSummary(points, viewer)`, `radarSummary(points)`.
+  - Trilha e checklists (RF-90, RF-95): `PhaseProgress { phase; title; done; total; ratio }`, `phaseProgress(doneItems, gateDone)`, `trailPercent(progress)`, `currentWeekLabel(node)`, `HeaderFacts`, `headerFacts({ phase, next, progress, completeDates, today })`, `studiedDays(completeDates, today, n)`.
+  - Mapa de calor (RF-94, RF-99a): `HeatKind = 'future' | 'none' | 'journal' | 'no_journal'`, `HeatCell { date; kind; items; simulations }`, `mondayOf(iso)`, `heatmapWeeks(activity, today, weeks = 20): HeatCell[][]` (colunas = semanas, 7 células por coluna, segunda em cima), `heatmapSummary(weeks): { withJournal; withoutJournal; activeDays; text }`.
+  - Caderno (RF-97a): `JournalEntryFact { date; complete; late }`, `JournalOverview { since; rate; lateCount; missing }`, `activityStart(activity, entries)`, `journalOverview(entries, start, now)`.
+  - Treinos (RF-97b): `TrainingFact { mode; status; createdAt; myScoreDone }`, `trainingsPerWeek(sims, today, weeks = 8)`, `pendingTrainings(sims)`.
+  - Storage (RNF-11): `StorageLevel = 'ok' | 'warn' | 'danger'`, `StorageSummary { usedBytes; limitBytes; ratio; level; books; recordings }`, `storageSummary(rows, limit?)`.
+  - `src/features/dashboard/hooks.ts` exporta **exatamente**: `useScoreSeries(): UseQueryResult<ScoreRow[]>`, `useActivityDays(): UseQueryResult<ActivityDay[]>`, `useStorageUsage(): UseQueryResult<StorageUsage[]>`.
+  - `src/test/dashboardMocks.ts`: `scoreRowOf`, `activityOf`, `usageOf` (todos aceitam `Partial<…>`), e reexporta `queryOf`, `mutationOf`, `asyncMutationOf`.
+
+- [ ] **Step 1: Testes do domínio**
+
+
+`src/domain/dashboard.test.ts`:
+```ts
+import { NODES, nodeById, PHASES } from '@/content/trail'
+import {
+  activityStart, averageGap, currentWeekLabel, evolutionSummary, formatBytes, formatScore, headerFacts, heatmapSummary, heatmapWeeks,
+  journalOverview, mondayOf, pendingTrainings, perceptionSummary, phaseProgress, radarByCriterion, radarSummary, SCORE_GOALS,
+  selfVsMentor, shortDate, storageSummary, studiedDays, trailPercent, trainingsPerWeek, weeklyOfficial, type ScoreRow,
+} from './dashboard'
+
+const at = (iso: string) => new Date(iso)
+const criteria = (n: number) => ({ abertura: n, tom: n, perguntas: n, escuta: n, objecao: n, fechamento: n })
+const row = (over: Partial<ScoreRow> = {}): ScoreRow => ({
+  simulationId: 'a', day: '2026-09-29', weekStart: '2026-09-28', mode: 'surpresa', difficulty: 'medio', phase: 'f2', isBoss: false,
+  studentTotal: 20, mentorTotal: 16, official: 18, byCriterion: criteria(3), ...over,
+})
+
+test('formatação em pt-BR', () => {
+  expect(formatScore(17)).toBe('17,0')
+  expect(formatScore(3.5)).toBe('3,5')
+  expect(shortDate('2026-09-29')).toBe('29/09')
+  expect(formatBytes(0)).toBe('0 B')
+  expect(formatBytes(2048)).toBe('2 KB')
+  expect(formatBytes(52_428_800)).toBe('50,0 MB')
+  expect(formatBytes(1024 ** 3)).toBe('1,0 GB')
+  expect(SCORE_GOALS).toEqual({ f2: 15, f4: 22 })
+})
+
+test('média oficial por semana, em ordem, com a contagem (RF-91)', () => {
+  const rows = [
+    row({ weekStart: '2026-09-21', official: 17 }),
+    row({ weekStart: '2026-09-14', official: 12 }),
+    row({ weekStart: '2026-09-14', official: 14 }),
+  ]
+  expect(weeklyOfficial(rows)).toEqual([
+    { weekStart: '2026-09-14', avg: 13, count: 2 },
+    { weekStart: '2026-09-21', avg: 17, count: 1 },
+  ])
+  expect(weeklyOfficial([])).toEqual([])
+})
+
+test('resumo em texto da evolução, com as metas 15 e 22', () => {
+  expect(evolutionSummary([])).toBe('Ainda não há simulados com as duas fichas.')
+  expect(evolutionSummary([{ weekStart: '2026-09-21', avg: 17, count: 2 }]))
+    .toBe('Semana de 21/09: média oficial 17,0 em 2 simulados. Meta 15: atingida. Meta 22: faltam 5,0.')
+  expect(evolutionSummary([{ weekStart: '2026-09-21', avg: 23, count: 1 }]))
+    .toBe('Semana de 21/09: média oficial 23,0 em 1 simulado. Meta 15: atingida. Meta 22: atingida.')
+})
+
+test('autoavaliação × mentor: um ponto por simulado, em ordem de dia (RF-92)', () => {
+  const pts = selfVsMentor([
+    row({ simulationId: 'b', day: '2026-09-29', studentTotal: 24, mentorTotal: 20 }),
+    row({ simulationId: 'a', day: '2026-09-20', studentTotal: 16, mentorTotal: 20 }),
+  ])
+  expect(pts).toEqual([
+    { simulationId: 'a', day: '2026-09-20', student: 16, mentor: 20, gap: -4 },
+    { simulationId: 'b', day: '2026-09-29', student: 24, mentor: 20, gap: 4 },
+  ])
+  expect(averageGap(pts)).toBe(0)
+  expect(averageGap([])).toBeNull()
+})
+
+test('resumo da diferença de percepção fala com quem está olhando', () => {
+  const up = selfVsMentor([row({ studentTotal: 24, mentorTotal: 20 })])
+  expect(perceptionSummary(up, 'mentor')).toBe('Ela se avalia, em média, 4,0 pontos acima da nota do mentor.')
+  expect(perceptionSummary(up, 'aluna')).toBe('Você se avalia, em média, 4,0 pontos acima da nota do mentor.')
+  const down = selfVsMentor([row({ studentTotal: 16, mentorTotal: 20 })])
+  expect(perceptionSummary(down, 'mentor')).toBe('Ela se avalia, em média, 4,0 pontos abaixo da nota do mentor.')
+  const near = selfVsMentor([row({ simulationId: 'a', studentTotal: 21, mentorTotal: 20 }), row({ simulationId: 'b', studentTotal: 19, mentorTotal: 20 })])
+  expect(perceptionSummary(near, 'aluna')).toBe('As duas avaliações estão próximas (diferença média de 0,0).')
+  expect(perceptionSummary([], 'aluna')).toBe('Ainda não há simulados com as duas fichas.')
+})
+
+test('radar: últimos 28 dias contra os 28 anteriores, com bordas exatas (RF-93)', () => {
+  const rows = [
+    row({ simulationId: 'r1', day: '2026-09-30', byCriterion: { ...criteria(3), abertura: 4 } }),
+    row({ simulationId: 'r2', day: '2026-09-03', byCriterion: { ...criteria(3), abertura: 3 } }), // primeiro dia do período recente
+    row({ simulationId: 'p1', day: '2026-09-02', byCriterion: { ...criteria(3), abertura: 2 } }), // último dia do anterior
+    row({ simulationId: 'p2', day: '2026-08-06', byCriterion: { ...criteria(3), abertura: 4 } }), // primeiro dia do anterior
+    row({ simulationId: 'old', day: '2026-08-05', byCriterion: { ...criteria(3), abertura: 1 } }), // fora
+    row({ simulationId: 'fut', day: '2026-10-01', byCriterion: { ...criteria(3), abertura: 1 } }), // dado no futuro é ignorado
+  ]
+  const pts = radarByCriterion(rows, '2026-09-30')
+  expect(pts).toHaveLength(6)
+  expect(pts[0]).toEqual({ criterion: 'abertura', label: 'Abertura', recent: 3.5, previous: 3 })
+  expect(pts[1]).toMatchObject({ criterion: 'tom', recent: 3, previous: 3 })
+})
+
+test('radar sem período anterior ou sem nada não inventa números', () => {
+  const only = radarByCriterion([row({ day: '2026-09-30' })], '2026-09-30')
+  expect(only.every((p) => p.recent === 3 && p.previous === null)).toBe(true)
+  expect(radarSummary(only)).toContain('Abertura 3,0 (sem período anterior)')
+  const none = radarByCriterion([], '2026-09-30')
+  expect(none.every((p) => p.recent === null && p.previous === null)).toBe(true)
+  expect(radarSummary(none)).toBe('Sem simulados com as duas fichas nas últimas 4 semanas.')
+  const two = radarByCriterion([row({ simulationId: 'x', day: '2026-09-30' }), row({ simulationId: 'y', day: '2026-09-01' })], '2026-09-30')
+  expect(radarSummary(two)).toContain('Abertura 3,0 (antes 3,0)')
+})
+
+test('progresso por fase conta itens obrigatórios e itens de portão (RF-95)', () => {
+  const requiredIds = (phase: string) => NODES.filter((n) => n.phase === phase).flatMap((n) => n.items).filter((i) => i.required).map((i) => i.id)
+  const empty = phaseProgress(new Set(), new Set())
+  expect(empty.map((p) => p.phase)).toEqual(['f1', 'f2', 'f3', 'f4'])
+  expect(empty.every((p) => p.done === 0 && p.total > 0 && p.ratio === 0)).toBe(true)
+  expect(trailPercent(empty)).toBe(0)
+  expect(trailPercent([])).toBe(0)
+
+  const full = phaseProgress(new Set(requiredIds('f1')), new Set(PHASES[0].gate.map((g) => g.id)))
+  expect(full[0]).toMatchObject({ phase: 'f1', title: 'Comunicação', ratio: 1 })
+  expect(full[1].done).toBe(0)
+  expect(trailPercent(full)).toBeGreaterThan(0)
+  expect(trailPercent(full)).toBeLessThan(1)
+})
+
+test('item de portão só conta quando o portão está feito (manual ou automático), não por estar na lista de itens', () => {
+  const p = phaseProgress(new Set(['f1.gate.2']), new Set())
+  expect(p[0].done).toBe(0)
+  expect(phaseProgress(new Set(), new Set(['f1.gate.2']))[0].done).toBe(1)
+})
+
+test('dias estudados nas janelas de 7 e 30 dias (RF-90)', () => {
+  const days = new Set(['2026-09-30', '2026-09-28', '2026-09-01', '2026-08-31'])
+  expect(studiedDays(days, '2026-09-30', 7)).toBe(2)
+  expect(studiedDays(days, '2026-09-30', 30)).toBe(3)
+  expect(studiedDays(new Set(), '2026-09-30', 30)).toBe(0)
+})
+
+test('rótulo da semana atual e cabeçalho', () => {
+  expect(currentWeekLabel(nodeById('w05'))).toBe('Semana 5')
+  expect(currentWeekLabel(nodeById('f4-marca'))).toBe(nodeById('f4-marca').title)
+  expect(currentWeekLabel(null)).toBe('Trilha concluída')
+  const facts = headerFacts({
+    phase: 'f2', next: nodeById('w05'), progress: phaseProgress(new Set(), new Set()),
+    completeDates: new Set(['2026-09-30', '2026-09-29']), today: '2026-09-30',
+  })
+  expect(facts).toEqual({ phaseLabel: 'Fase 2 · Vendas', weekLabel: 'Semana 5', percent: 0, streak: 2, days7: 2, days30: 2 })
+})
+
+test('mapa de calor: semanas de segunda a domingo, futuro vazio, dias sem caderno marcados (RF-94, RF-99a)', () => {
+  const weeks = heatmapWeeks([
+    { day: '2026-09-29', items: 2, simulations: 0, journal: true },
+    { day: '2026-09-30', items: 1, simulations: 0, journal: false },
+    { day: '2026-09-23', items: 0, simulations: 0, journal: true },
+    { day: '2026-10-05', items: 9, simulations: 0, journal: true }, // dado no futuro não pinta nada
+  ], '2026-09-30', 2)
+  expect(weeks).toHaveLength(2)
+  expect(weeks.every((w) => w.length === 7)).toBe(true)
+  expect(weeks[0][0].date).toBe('2026-09-21') // segunda
+  expect(weeks[1][0].date).toBe('2026-09-28')
+  expect(weeks[1][1]).toEqual({ date: '2026-09-29', kind: 'journal', items: 2, simulations: 0 })
+  expect(weeks[1][2].kind).toBe('no_journal') // 30/09: item marcado, sem caderno
+  expect(weeks[1][3].kind).toBe('future') // 01/10
+  expect(weeks[1][6]).toMatchObject({ date: '2026-10-04', kind: 'future' })
+  expect(weeks[0][2].kind).toBe('journal') // 23/09: só o caderno
+  expect(weeks[0][1].kind).toBe('none')
+  const s = heatmapSummary(weeks)
+  expect(s).toEqual({ withJournal: 2, withoutJournal: 1, activeDays: 3, text: '3 dias com atividade: 2 com caderno e 1 sem caderno.' })
+  expect(heatmapSummary(heatmapWeeks([], '2026-09-30', 2)).text).toBe('Nenhuma atividade no período.')
+  expect(heatmapSummary(heatmapWeeks([{ day: '2026-09-30', items: 1, simulations: 0, journal: false }], '2026-09-30', 1)).text)
+    .toBe('1 dia com atividade: 0 com caderno e 1 sem caderno.')
+})
+
+test('hoje domingo: a última coluna termina hoje', () => {
+  expect(mondayOf('2026-10-04')).toBe('2026-09-28')
+  const weeks = heatmapWeeks([], '2026-10-04', 1)
+  expect(weeks[0][0].date).toBe('2026-09-28')
+  expect(weeks[0][6]).toMatchObject({ date: '2026-10-04', kind: 'none' })
+})
+
+test('caderno em dia: ontem antes das 12:00 de SP ainda não é falta (Review Focus 1)', () => {
+  const entries = [
+    { date: '2026-09-25', complete: true, late: false },
+    { date: '2026-09-26', complete: true, late: true },
+    { date: '2026-09-27', complete: false, late: false },
+  ]
+  const noon = journalOverview(entries, '2026-09-25', at('2026-09-30T15:00:00Z'))
+  expect(noon.missing).toEqual(['2026-09-27', '2026-09-28', '2026-09-29'])
+  expect(noon.rate).toBeCloseTo(2 / 5)
+  expect(noon.lateCount).toBe(1)
+  expect(noon.since).toBe('2026-09-25')
+  const before = journalOverview(entries, '2026-09-25', at('2026-09-30T14:59:00Z'))
+  expect(before.missing).toEqual(['2026-09-27', '2026-09-28'])
+  expect(before.rate).toBeCloseTo(2 / 4)
+  // 02:59Z do dia 30 ainda é dia 29 em SP: o dia 29 (hoje) não é falta e o dia 28 já fechou ao meio-dia do 29
+  const night = journalOverview(entries, '2026-09-25', at('2026-09-30T02:59:00Z'))
+  expect(night.missing).toEqual(['2026-09-27', '2026-09-28'])
+})
+
+test('caderno em dia sem nenhum dia fechado ou sem início não divide por zero', () => {
+  expect(journalOverview([], null, at('2026-09-30T15:00:00Z'))).toEqual({ since: null, rate: null, lateCount: 0, missing: [] })
+  expect(journalOverview([], '2026-09-30', at('2026-09-30T15:00:00Z')).rate).toBeNull()
+})
+
+test('início da contagem é o primeiro dia com atividade ou entrada', () => {
+  expect(activityStart([{ day: '2026-09-20', items: 1, simulations: 0, journal: false }], [{ date: '2026-09-25' }])).toBe('2026-09-20')
+  expect(activityStart([], [{ date: '2026-09-25' }, { date: '2026-09-24' }])).toBe('2026-09-24')
+  expect(activityStart([], [])).toBeNull()
+})
+
+test('treinos por semana usam o dia de SP, não o de UTC (RF-97b)', () => {
+  const sims = [
+    { mode: 'treino' as const, status: 'concluido' as const, createdAt: '2026-09-28T02:00:00Z', myScoreDone: true }, // domingo 27/09 23:00 em SP
+    { mode: 'treino' as const, status: 'concluido' as const, createdAt: '2026-09-27T15:00:00Z', myScoreDone: true },
+    { mode: 'treino' as const, status: 'aguardando_notas' as const, createdAt: '2026-09-29T15:00:00Z', myScoreDone: false },
+    { mode: 'surpresa' as const, status: 'concluido' as const, createdAt: '2026-09-29T15:00:00Z', myScoreDone: true },
+  ]
+  expect(trainingsPerWeek(sims, '2026-09-30', 3)).toEqual([
+    { weekStart: '2026-09-14', count: 0 }, { weekStart: '2026-09-21', count: 2 }, { weekStart: '2026-09-28', count: 1 },
+  ])
+})
+
+test('treinos aguardando a avaliação do mentor', () => {
+  const base = { createdAt: '2026-09-29T15:00:00Z' }
+  expect(pendingTrainings([
+    { ...base, mode: 'treino', status: 'aguardando_notas', myScoreDone: false },
+    { ...base, mode: 'treino', status: 'aguardando_notas', myScoreDone: true },
+    { ...base, mode: 'treino', status: 'concluido', myScoreDone: true },
+    { ...base, mode: 'surpresa', status: 'aguardando_notas', myScoreDone: false },
+  ])).toBe(1)
+})
+
+test('uso do Storage: soma, nível e buckets ausentes (RNF-11)', () => {
+  const s = storageSummary([{ bucket: 'books', bytes: 52_428_800, files: 1 }])
+  expect(s).toMatchObject({ usedBytes: 52_428_800, limitBytes: 1024 ** 3, level: 'ok' })
+  expect(s.recordings).toEqual({ bucket: 'recordings', bytes: 0, files: 0 })
+  expect(s.ratio).toBeCloseTo(0.0488, 3)
+  expect(storageSummary([]).usedBytes).toBe(0)
+  expect(storageSummary([{ bucket: 'books', bytes: Math.round(0.85 * 1024 ** 3), files: 5 }]).level).toBe('warn')
+  const full = storageSummary([{ bucket: 'recordings', bytes: 2 * 1024 ** 3, files: 9 }])
+  expect(full.level).toBe('danger')
+  expect(full.ratio).toBe(1)
+})
+```
+
+`src/features/dashboard/contract.test.ts`:
+```ts
+vi.mock('@/lib/supabase', () => ({ supabase: {} }))
+
+test('o módulo de hooks dos painéis exporta exatamente o contrato combinado', async () => {
+  expect(Object.keys(await import('./hooks')).sort()).toEqual(['useActivityDays', 'useScoreSeries', 'useStorageUsage'])
+})
+```
+
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/domain/dashboard.test.ts src/features/dashboard/contract.test.ts 2>&1 | tail -15`
+Expected: FAIL — `Failed to resolve import "./dashboard"` e `"./hooks"`.
+
+- [ ] **Step 3: Implementar o domínio**
+
+
+`src/domain/dashboard.ts`:
+```ts
+import { NODES, PHASES } from '@/content/trail'
+import type { PhaseId, TrailNode } from '@/content/types'
+import { addDays, daysBetween, spDate } from '@/lib/dates'
+import { journalDayStatus } from './journalDays'
+import type { Difficulty } from './roulette'
+import { weekday } from './routine'
+import { average, CRITERIA, CRITERIA_LABELS, type Criterion, type Scores } from './scoring'
+import type { SimMode, SimStatus } from './simulationState'
+import { currentStreak } from './streak'
+
+/** Metas sobre o total de um simulado (soma dos 6 critérios, de 6 a 30): média ≥ 15 na Fase 2 e ≥ 22 nos difíceis da Fase 4 (RF-91). */
+export const SCORE_GOALS = { f2: 15, f4: 22 } as const
+export const SCORE_RANGE = { min: 6, max: 30 } as const
+/** Plano gratuito do Supabase: 1 GB de Storage (RNF-04, RNF-11). */
+export const STORAGE_LIMIT_BYTES = 1024 ** 3
+
+const PERIOD_DAYS = 28
+const NO_SCORES = 'Ainda não há simulados com as duas fichas.'
+
+// ---------- linhas vindas do banco (já em America/Sao_Paulo) ----------
+
+/** Uma linha de `v_score_series`: simulado com as duas fichas enviadas. */
+export interface ScoreRow {
+  simulationId: string
+  day: string
+  weekStart: string
+  mode: SimMode
+  difficulty: Difficulty
+  phase: PhaseId
+  isBoss: boolean
+  studentTotal: number
+  mentorTotal: number
+  official: number
+  /** Média oficial de cada critério (as duas fichas). */
+  byCriterion: Scores
+}
+
+/** Uma linha de `v_activity_days`. `journal` = caderno completo naquele dia. */
+export interface ActivityDay { day: string; items: number; simulations: number; journal: boolean }
+
+export type StorageBucket = 'books' | 'recordings'
+export interface StorageUsage { bucket: StorageBucket; bytes: number; files: number }
+
+// ---------- formatação ----------
+
+export const formatScore = (n: number): string => (Math.round(n * 10) / 10).toFixed(1).replace('.', ',')
+
+/** '2026-09-29' → '29/09'. */
+export const shortDate = (iso: string): string => `${iso.slice(8, 10)}/${iso.slice(5, 7)}`
+
+export function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  const units = ['KB', 'MB', 'GB']
+  let v = n
+  let i = -1
+  do { v /= 1024; i++ } while (v >= 1024 && i < units.length - 1)
+  return `${v.toFixed(i === 0 ? 0 : 1).replace('.', ',')} ${units[i]}`
+}
+
+const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`
+
+/** Segunda-feira da semana de uma data de calendário. */
+export const mondayOf = (iso: string): string => addDays(iso, -((weekday(iso) + 6) % 7))
+
+// ---------- notas (RF-91, RF-92, RF-93) ----------
+
+export interface WeekPoint { weekStart: string; avg: number; count: number }
+
+export function weeklyOfficial(rows: ScoreRow[]): WeekPoint[] {
+  const byWeek = new Map<string, number[]>()
+  for (const r of rows) byWeek.set(r.weekStart, [...(byWeek.get(r.weekStart) ?? []), r.official])
+  return [...byWeek.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([weekStart, values]) => ({ weekStart, avg: average(values) ?? 0, count: values.length }))
+}
+
+export function evolutionSummary(points: WeekPoint[]): string {
+  if (points.length === 0) return NO_SCORES
+  const last = points[points.length - 1]
+  const goal = (label: string, g: number) => (last.avg >= g ? `${label}: atingida.` : `${label}: faltam ${formatScore(g - last.avg)}.`)
+  return `Semana de ${shortDate(last.weekStart)}: média oficial ${formatScore(last.avg)} em ${plural(last.count, 'simulado', 'simulados')}. `
+    + `${goal('Meta 15', SCORE_GOALS.f2)} ${goal('Meta 22', SCORE_GOALS.f4)}`
+}
+
+export interface PerceptionPoint { simulationId: string; day: string; student: number; mentor: number; gap: number }
+
+export function selfVsMentor(rows: ScoreRow[]): PerceptionPoint[] {
+  return [...rows]
+    .sort((a, b) => a.day.localeCompare(b.day) || a.simulationId.localeCompare(b.simulationId))
+    .map((r) => ({ simulationId: r.simulationId, day: r.day, student: r.studentTotal, mentor: r.mentorTotal, gap: r.studentTotal - r.mentorTotal }))
+}
+
+/** Positivo = ela se avalia acima do mentor. */
+export const averageGap = (points: PerceptionPoint[]): number | null => average(points.map((p) => p.gap))
+
+export function perceptionSummary(points: PerceptionPoint[], viewer: 'mentor' | 'aluna'): string {
+  const gap = averageGap(points)
+  if (gap === null) return NO_SCORES
+  if (Math.abs(gap) < 1) return `As duas avaliações estão próximas (diferença média de ${formatScore(Math.abs(gap))}).`
+  const who = viewer === 'mentor' ? 'Ela se avalia' : 'Você se avalia'
+  return `${who}, em média, ${formatScore(Math.abs(gap))} pontos ${gap > 0 ? 'acima' : 'abaixo'} da nota do mentor.`
+}
+
+export interface RadarPoint { criterion: Criterion; label: string; recent: number | null; previous: number | null }
+
+/** Média oficial por critério: últimos 28 dias (contando hoje) contra os 28 dias anteriores. */
+export function radarByCriterion(rows: ScoreRow[], today: string): RadarPoint[] {
+  const recentFrom = addDays(today, -(PERIOD_DAYS - 1))
+  const previousFrom = addDays(today, -(2 * PERIOD_DAYS - 1))
+  const recent = rows.filter((r) => r.day >= recentFrom && r.day <= today)
+  const previous = rows.filter((r) => r.day >= previousFrom && r.day < recentFrom)
+  return CRITERIA.map((c) => ({
+    criterion: c,
+    label: CRITERIA_LABELS[c].label,
+    recent: average(recent.map((r) => r.byCriterion[c])),
+    previous: average(previous.map((r) => r.byCriterion[c])),
+  }))
+}
+
+export function radarSummary(points: RadarPoint[]): string {
+  if (points.every((p) => p.recent === null)) return 'Sem simulados com as duas fichas nas últimas 4 semanas.'
+  const part = (p: RadarPoint) => (p.recent === null
+    ? `${p.label} sem notas`
+    : `${p.label} ${formatScore(p.recent)} (${p.previous === null ? 'sem período anterior' : `antes ${formatScore(p.previous)}`})`)
+  return `Últimas 4 semanas: ${points.map(part).join('; ')}.`
+}
+
+// ---------- trilha e checklists (RF-90, RF-95) ----------
+
+export interface PhaseProgress { phase: PhaseId; title: string; done: number; total: number; ratio: number }
+
+/** Por fase: itens obrigatórios das semanas + itens do portão. O portão vem de `TrailState.gateDone` (manual ou automático). */
+export function phaseProgress(doneItems: ReadonlySet<string>, gateDone: ReadonlySet<string>): PhaseProgress[] {
+  return PHASES.map((p) => {
+    const items = NODES.filter((n) => n.phase === p.id).flatMap((n) => n.items).filter((i) => i.required).map((i) => i.id)
+    const gates = p.gate.map((g) => g.id)
+    const total = items.length + gates.length
+    const done = items.filter((id) => doneItems.has(id)).length + gates.filter((id) => gateDone.has(id)).length
+    return { phase: p.id, title: p.title, done, total, ratio: total === 0 ? 0 : done / total }
+  })
+}
+
+/** 0 a 1, sobre todos os itens de todas as fases. */
+export function trailPercent(progress: PhaseProgress[]): number {
+  const total = progress.reduce((n, p) => n + p.total, 0)
+  return total === 0 ? 0 : progress.reduce((n, p) => n + p.done, 0) / total
+}
+
+/** Dias estudados (caderno completo) em `today` e nos `n - 1` dias anteriores. */
+export function studiedDays(completeDates: ReadonlySet<string>, today: string, n: number): number {
+  let count = 0
+  for (let i = 0; i < n; i++) if (completeDates.has(addDays(today, -i))) count++
+  return count
+}
+
+export const currentWeekLabel = (node: TrailNode | null): string =>
+  node === null ? 'Trilha concluída' : node.week !== undefined ? `Semana ${node.week}` : node.title
+
+export interface HeaderFacts { phaseLabel: string; weekLabel: string; percent: number; streak: number; days7: number; days30: number }
+
+export function headerFacts(i: {
+  phase: PhaseId; next: TrailNode | null; progress: PhaseProgress[]; completeDates: ReadonlySet<string>; today: string
+}): HeaderFacts {
+  const title = PHASES.find((p) => p.id === i.phase)?.title ?? ''
+  return {
+    phaseLabel: `Fase ${i.phase.slice(1)} · ${title}`,
+    weekLabel: currentWeekLabel(i.next),
+    percent: Math.round(trailPercent(i.progress) * 100),
+    streak: currentStreak(i.completeDates, i.today),
+    days7: studiedDays(i.completeDates, i.today, 7),
+    days30: studiedDays(i.completeDates, i.today, 30),
+  }
+}
+
+// ---------- mapa de calor (RF-94, RF-99a) ----------
+
+export type HeatKind = 'future' | 'none' | 'journal' | 'no_journal'
+export interface HeatCell { date: string; kind: HeatKind; items: number; simulations: number }
+
+/** Colunas = semanas (segunda a domingo), da mais antiga à atual; cada coluna tem 7 células, segunda em cima. */
+export function heatmapWeeks(activity: ActivityDay[], today: string, weeks = 20): HeatCell[][] {
+  const byDay = new Map(activity.map((a) => [a.day, a]))
+  const first = addDays(mondayOf(today), -7 * (weeks - 1))
+  return Array.from({ length: weeks }, (_, w) => Array.from({ length: 7 }, (_, d): HeatCell => {
+    const date = addDays(first, w * 7 + d)
+    const a = byDay.get(date)
+    const items = a?.items ?? 0
+    const simulations = a?.simulations ?? 0
+    const kind: HeatKind = date > today ? 'future' : a?.journal ? 'journal' : items + simulations > 0 ? 'no_journal' : 'none'
+    return { date, kind, items, simulations }
+  }))
+}
+
+export function heatmapSummary(weeks: HeatCell[][]): { withJournal: number; withoutJournal: number; activeDays: number; text: string } {
+  const cells = weeks.flat()
+  const withJournal = cells.filter((c) => c.kind === 'journal').length
+  const withoutJournal = cells.filter((c) => c.kind === 'no_journal').length
+  const activeDays = withJournal + withoutJournal
+  const text = activeDays === 0
+    ? 'Nenhuma atividade no período.'
+    : `${plural(activeDays, 'dia com atividade', 'dias com atividade')}: ${withJournal} com caderno e ${withoutJournal} sem caderno.`
+  return { withJournal, withoutJournal, activeDays, text }
+}
+
+// ---------- caderno em dia (RF-97a) ----------
+
+export interface JournalEntryFact { date: string; complete: boolean; late: boolean }
+export interface JournalOverview { since: string | null; rate: number | null; lateCount: number; missing: string[] }
+
+/** Primeiro dia com atividade ou entrada de caderno: de onde se conta "desde o início". */
+export function activityStart(activity: ActivityDay[], entries: { date: string }[]): string | null {
+  const all = [...activity.map((a) => a.day), ...entries.map((e) => e.date)].sort()
+  return all[0] ?? null
+}
+
+/**
+ * Taxa de dias com caderno completo desde `start`, dias com atraso e dias em falta. Só conta como falta o dia já
+ * fechado (RF-50: ontem só fecha às 12:00 de SP; hoje nunca é falta), por isso usa `journalDayStatus`.
+ */
+export function journalOverview(entries: JournalEntryFact[], start: string | null, now: Date): JournalOverview {
+  const lateCount = entries.filter((e) => e.complete && e.late).length
+  if (start === null) return { since: null, rate: null, lateCount, missing: [] }
+  const byDate = new Map(entries.map((e) => [e.date, e]))
+  const missing: string[] = []
+  let closed = 0
+  for (const date of daysBetween(start, spDate(now))) {
+    const status = journalDayStatus(date, now, byDate.get(date))
+    if (status === 'missing') { closed++; missing.push(date) } else if (status === 'done' || status === 'done_late') closed++
+  }
+  return { since: start, rate: closed === 0 ? null : (closed - missing.length) / closed, lateCount, missing }
+}
+
+// ---------- treinos (RF-97b) ----------
+
+export interface TrainingFact { mode: SimMode; status: SimStatus; createdAt: string; myScoreDone: boolean }
+
+/** Treinos criados por semana (segunda a domingo em SP), da mais antiga à atual. */
+export function trainingsPerWeek(sims: TrainingFact[], today: string, weeks = 8): { weekStart: string; count: number }[] {
+  const starts = Array.from({ length: weeks }, (_, i) => addDays(mondayOf(today), -7 * (weeks - 1 - i)))
+  const counts = new Map(starts.map((s) => [s, 0]))
+  for (const s of sims) {
+    if (s.mode !== 'treino') continue
+    const week = mondayOf(spDate(new Date(s.createdAt)))
+    if (counts.has(week)) counts.set(week, (counts.get(week) ?? 0) + 1)
+  }
+  return starts.map((weekStart) => ({ weekStart, count: counts.get(weekStart) ?? 0 }))
+}
+
+/** Visão do mentor: treinos ainda sem a ficha dele (`myScoreDone` é a ficha de quem está logado). */
+export const pendingTrainings = (sims: TrainingFact[]): number =>
+  sims.filter((s) => s.mode === 'treino' && s.status === 'aguardando_notas' && !s.myScoreDone).length
+
+// ---------- Storage (RNF-11) ----------
+
+export type StorageLevel = 'ok' | 'warn' | 'danger'
+export interface StorageSummary {
+  usedBytes: number
+  limitBytes: number
+  /** 0 a 1 (limitado a 1 para a barra). */
+  ratio: number
+  level: StorageLevel
+  books: StorageUsage
+  recordings: StorageUsage
+}
+
+export function storageSummary(rows: StorageUsage[], limit: number = STORAGE_LIMIT_BYTES): StorageSummary {
+  const pick = (bucket: StorageBucket): StorageUsage => rows.find((r) => r.bucket === bucket) ?? { bucket, bytes: 0, files: 0 }
+  const books = pick('books')
+  const recordings = pick('recordings')
+  const usedBytes = books.bytes + recordings.bytes
+  const raw = usedBytes / limit
+  return { usedBytes, limitBytes: limit, ratio: Math.min(1, raw), level: raw >= 0.95 ? 'danger' : raw >= 0.8 ? 'warn' : 'ok', books, recordings }
+}
+```
+
+`src/features/dashboard/types.ts`:
+```ts
+export type { ActivityDay, ScoreRow, StorageBucket, StorageUsage } from '@/domain/dashboard'
+```
+
+`src/features/dashboard/hooks.ts` (esqueleto; a Task 46 troca os corpos, sem mudar nomes nem tipos):
+```ts
+import type { UseQueryResult } from '@tanstack/react-query'
+import type { ActivityDay, ScoreRow, StorageUsage } from './types'
+
+function notYet(name: string): never {
+  throw new Error(`${name}: implementado na Task 46`)
+}
+
+export function useScoreSeries(): UseQueryResult<ScoreRow[]> { return notYet('useScoreSeries') }
+export function useActivityDays(): UseQueryResult<ActivityDay[]> { return notYet('useActivityDays') }
+export function useStorageUsage(): UseQueryResult<StorageUsage[]> { return notYet('useStorageUsage') }
+```
+
+`src/test/dashboardMocks.ts`:
+```ts
+import type { ActivityDay, ScoreRow, StorageUsage } from '@/domain/dashboard'
+
+export { asyncMutationOf, mutationOf, queryOf } from './simulationMocks'
+
+export function scoreRowOf(over: Partial<ScoreRow> = {}): ScoreRow {
+  return {
+    simulationId: 'sim-1', day: '2026-09-29', weekStart: '2026-09-28', mode: 'surpresa', difficulty: 'medio', phase: 'f2', isBoss: false,
+    studentTotal: 20, mentorTotal: 16, official: 18,
+    byCriterion: { abertura: 3, tom: 3, perguntas: 3, escuta: 3, objecao: 3, fechamento: 3 },
+    ...over,
+  }
+}
+
+export const activityOf = (over: Partial<ActivityDay> = {}): ActivityDay => ({ day: '2026-09-29', items: 2, simulations: 0, journal: true, ...over })
+
+export const usageOf = (over: Partial<StorageUsage> = {}): StorageUsage => ({ bucket: 'books', bytes: 52_428_800, files: 1, ...over })
+```
+
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npx vitest run src/domain/dashboard.test.ts src/features/dashboard/contract.test.ts 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS em todos os testes; `tsc` sem erros.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/domain/dashboard.ts src/domain/dashboard.test.ts src/features/dashboard/types.ts src/features/dashboard/hooks.ts src/features/dashboard/contract.test.ts src/test/dashboardMocks.ts
+git commit -m "feat(e7): dashboard domain rules and data contract"
+```
+
+---
+
+### Task 45: Migration — séries de notas, atividade por dia e uso do Storage — **[W3]**
+
+**Files:**
+- Create: `supabase/migrations/20260930000003_dashboards.sql`, `supabase/tests/dashboards.test.sql`
+
+**Interfaces:**
+- Consumes: `simulations`, `simulation_scores`, `profiles`, `item_progress`, `journal_entries`, `v_simulation_official` (Tasks 3, 5 e E5), `my_role()`, bucket `books` e `recordings`.
+- Produces:
+  - `public.v_score_series` (`security_invoker`): `simulation_id, mode, difficulty, phase, is_boss, day, week_start, student_total, mentor_total, abertura, tom, perguntas, escuta, objecao, fechamento, total_official`. Uma linha por simulado **com as duas fichas** (herdado de `v_simulation_official` + RLS das fichas). `day` e `week_start` (segunda) em `America/Sao_Paulo`.
+  - `public.v_activity_days` (`security_invoker`): `day, items, simulations, journal`. Atividade da aluna por dia em SP: item marcado por ela, simulado criado, caderno **completo** (rascunho e item marcado pelo mentor não contam).
+  - `public.storage_usage()` → `(bucket text, bytes bigint, files integer)`, só para o mentor (`mentor_only`, `42501` para os outros), só os buckets `books` e `recordings`.
+  - Nada disso é acessível ao papel `anon`.
+- Nada de RLS novo em tabelas: as views herdam as políticas existentes; esta Task as **prova**.
+
+- [ ] **Step 1: Testes pgTAP primeiro**
+
+
+`supabase/tests/dashboards.test.sql`:
+```sql
+begin;
+-- independente das contas locais: tudo é desfeito pelo rollback no fim
+truncate public.profiles cascade;
+delete from auth.users;
+select plan(16);
+
+insert into auth.users (id, email) values
+  ('00000000-0000-0000-0000-00000000000a', 'aluna@test'),
+  ('00000000-0000-0000-0000-00000000000b', 'mentor@test');
+insert into public.profiles values
+  ('00000000-0000-0000-0000-00000000000a', 'aluna', 'Aluna'),
+  ('00000000-0000-0000-0000-00000000000b', 'mentor', 'Mentor');
+
+-- montagem como dono do banco: as regras de tempo e de status (triggers) ficam de fora só aqui
+alter table public.simulation_scores disable trigger user;
+alter table public.journal_entries disable trigger user;
+
+insert into public.simulations (id, mode, difficulty, phase, status, created_by, created_at) values
+  ('11111111-0000-0000-0000-000000000001', 'surpresa', 'medio',   'f2', 'concluido',        '00000000-0000-0000-0000-00000000000b', '2026-09-29 15:00:00+00'),
+  ('11111111-0000-0000-0000-000000000002', 'treino',   'facil',   'f1', 'aguardando_notas', '00000000-0000-0000-0000-00000000000a', '2026-09-29 16:00:00+00'),
+  -- 28/09 01:30Z = domingo 27/09 22:30 em SP: pertence à semana de 21/09
+  ('11111111-0000-0000-0000-000000000003', 'treino',   'dificil', 'f4', 'concluido',        '00000000-0000-0000-0000-00000000000a', '2026-09-28 01:30:00+00'),
+  ('11111111-0000-0000-0000-000000000004', 'surpresa', 'medio',   'f2', 'aguardando_notas', '00000000-0000-0000-0000-00000000000b', '2026-09-29 17:00:00+00');
+
+insert into public.simulation_scores (simulation_id, rater_id, abertura, tom, perguntas, escuta, objecao, fechamento) values
+  ('11111111-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', 4, 4, 4, 4, 4, 4),
+  ('11111111-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000b', 3, 3, 3, 3, 3, 3),
+  ('11111111-0000-0000-0000-000000000002', '00000000-0000-0000-0000-00000000000a', 3, 3, 3, 3, 3, 3),
+  ('11111111-0000-0000-0000-000000000003', '00000000-0000-0000-0000-00000000000a', 5, 5, 5, 5, 5, 5),
+  ('11111111-0000-0000-0000-000000000003', '00000000-0000-0000-0000-00000000000b', 4, 4, 4, 4, 4, 4),
+  ('11111111-0000-0000-0000-000000000004', '00000000-0000-0000-0000-00000000000b', 2, 2, 2, 2, 2, 2);
+
+-- 29/09 02:30Z = 28/09 23:30 em SP; o item marcado pelo mentor não conta como atividade da aluna
+insert into public.item_progress (item_id, done_by, done_at) values
+  ('w01.video.1', '00000000-0000-0000-0000-00000000000a', '2026-09-29 02:30:00+00'),
+  ('w01.reading', '00000000-0000-0000-0000-00000000000a', '2026-09-29 12:00:00+00'),
+  ('w01.video.2', '00000000-0000-0000-0000-00000000000b', '2026-09-20 12:00:00+00');
+insert into public.journal_entries (user_id, date, learned, practiced, tomorrow, complete) values
+  ('00000000-0000-0000-0000-00000000000a', '2026-09-28', 'aprendi a ouvir o cliente', 'pratiquei o pitch de 30 s', 'ligar para 3 empresas', true),
+  ('00000000-0000-0000-0000-00000000000a', '2026-09-25', 'rascunho', '', '', false);
+
+insert into storage.objects (bucket_id, name, metadata) values
+  ('books', 'carnegie/1.pdf', '{"size": 1000}'), ('books', 'carnegie/2.pdf', '{"size": 500}'),
+  ('recordings', '11111111-0000-0000-0000-000000000002/a.webm', '{"size": 200}');
+
+-- aluna
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-00000000000a","role":"authenticated"}';
+
+select is((select count(*)::int from public.v_score_series), 2, 'aluna vê só os simulados com as duas fichas');
+select is((select count(*)::int from public.v_score_series where simulation_id in
+  ('11111111-0000-0000-0000-000000000002', '11111111-0000-0000-0000-000000000004')), 0, 'ficha isolada (dela ou do mentor) não aparece');
+select results_eq(
+  $$ select student_total, mentor_total, total_official from public.v_score_series where simulation_id = '11111111-0000-0000-0000-000000000001' $$,
+  $$ values (24, 18, 21.0::numeric) $$, 'total de cada pessoa e nota oficial');
+select is((select abertura from public.v_score_series where simulation_id = '11111111-0000-0000-0000-000000000001'), 3.5::numeric, 'média oficial por critério');
+select results_eq(
+  $$ select day, week_start from public.v_score_series where simulation_id = '11111111-0000-0000-0000-000000000003' $$,
+  $$ values ('2026-09-27'::date, '2026-09-21'::date) $$, 'domingo à noite em SP fica na semana de segunda 21/09');
+select results_eq(
+  $$ select day, items, simulations, journal from public.v_activity_days order by day $$,
+  $$ values ('2026-09-27'::date, 0, 1, false), ('2026-09-28'::date, 1, 0, true), ('2026-09-29'::date, 1, 3, false) $$,
+  'atividade por dia em SP; rascunho e item do mentor não contam');
+select throws_ok($$ select * from public.storage_usage() $$, '42501', 'mentor_only', 'aluna não vê o uso do Storage');
+
+-- mentor
+set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-00000000000b","role":"authenticated"}';
+select is((select count(*)::int from public.v_score_series), 2, 'mentor vê os mesmos simulados completos');
+select is((select count(*)::int from public.v_activity_days), 3, 'mentor vê a atividade');
+select ok((select bytes >= 1500 and files >= 2 from public.storage_usage() where bucket = 'books'), 'mentor soma os livros');
+select ok((select bytes >= 200 and files >= 1 from public.storage_usage() where bucket = 'recordings'), 'mentor soma as gravações');
+select is((select bytes from public.storage_usage() where bucket = 'books'),
+  (select sum((metadata ->> 'size')::bigint)::bigint from storage.objects where bucket_id = 'books'), 'soma confere com o Storage');
+select is((select count(*)::int from public.storage_usage() where bucket not in ('books', 'recordings')), 0, 'só os dois buckets do app');
+
+-- visitante sem login
+reset role;
+set local role anon;
+select throws_ok($$ select count(*) from public.v_score_series $$, '42501', null, 'anônimo não lê a série de notas');
+select throws_ok($$ select count(*) from public.v_activity_days $$, '42501', null, 'anônimo não lê a atividade');
+select throws_ok($$ select * from public.storage_usage() $$, '42501', null, 'anônimo não executa storage_usage');
+
+select * from finish();
+rollback;
+```
+
+
+- [ ] **Step 2: Ver falhar**
+
+Run: `npx --yes supabase@2 test db 2>&1 | tail -15`
+Expected: os testes antigos ok; `dashboards.test.sql` FAIL (`relation "public.v_score_series" does not exist` e a função `storage_usage` inexistente).
+
+- [ ] **Step 3: Implementar a migration**
+
+
+`supabase/migrations/20260930000003_dashboards.sql`:
+```sql
+-- Painéis (E7). Datas sempre em America/Sao_Paulo; a semana começa na segunda.
+
+-- Um simulado com as duas fichas por linha: total de cada pessoa (RF-92) e médias oficiais (RF-91, RF-93).
+-- security_invoker: o RLS das fichas vale, então ninguém enxerga a ficha do outro antes de as duas existirem (RF-80).
+create view public.v_score_series with (security_invoker = true) as
+select s.id as simulation_id, s.mode, s.difficulty, s.phase, s.is_boss,
+       timezone('America/Sao_Paulo', s.created_at)::date as day,
+       date_trunc('week', timezone('America/Sao_Paulo', s.created_at))::date as week_start,
+       t.student_total, t.mentor_total,
+       o.abertura, o.tom, o.perguntas, o.escuta, o.objecao, o.fechamento, o.total_official
+from public.simulations s
+join public.v_simulation_official o on o.simulation_id = s.id
+join (
+  select sc.simulation_id,
+         max(sc.abertura + sc.tom + sc.perguntas + sc.escuta + sc.objecao + sc.fechamento) filter (where p.role = 'aluna')::int  as student_total,
+         max(sc.abertura + sc.tom + sc.perguntas + sc.escuta + sc.objecao + sc.fechamento) filter (where p.role = 'mentor')::int as mentor_total
+  from public.simulation_scores sc
+  join public.profiles p on p.id = sc.rater_id
+  group by sc.simulation_id
+) t on t.simulation_id = s.id;
+
+-- Atividade por dia (RF-94/99a): item marcado pela aluna, simulado criado ou caderno completo.
+create view public.v_activity_days with (security_invoker = true) as
+select day, sum(items)::int as items, sum(simulations)::int as simulations, bool_or(journal) as journal
+from (
+  select timezone('America/Sao_Paulo', ip.done_at)::date as day, 1 as items, 0 as simulations, false as journal
+  from public.item_progress ip
+  join public.profiles p on p.id = ip.done_by and p.role = 'aluna'
+  union all
+  select je.date, 0, 0, true from public.journal_entries je where je.complete
+  union all
+  select timezone('America/Sao_Paulo', s.created_at)::date, 0, 1, false from public.simulations s
+) a
+group by day;
+
+-- Uso do Storage (RNF-11): só o mentor. security definer porque as políticas de storage.objects não somam tudo.
+create or replace function public.storage_usage() returns table (bucket text, bytes bigint, files integer)
+language plpgsql stable security definer set search_path = '' as $$
+begin
+  if public.my_role() is distinct from 'mentor' then
+    raise exception 'mentor_only' using errcode = '42501';
+  end if;
+  return query
+    select o.bucket_id::text, coalesce(sum((o.metadata ->> 'size')::bigint), 0)::bigint, count(*)::integer
+    from storage.objects o
+    where o.bucket_id in ('books', 'recordings')
+    group by o.bucket_id;
+end $$;
+
+revoke all on public.v_score_series, public.v_activity_days from anon;
+revoke all on function public.storage_usage() from public, anon;
+grant execute on function public.storage_usage() to authenticated;
+```
+
+
+- [ ] **Step 4: Aplicar e ver passar**
+
+Run: `npx --yes supabase@2 migration up 2>&1 | tail -3 && npx --yes supabase@2 test db 2>&1 | grep -E "\.\.\. |Result"`
+Expected: "Migrations applied"; `journal.test.sql`, `rls.test.sql`, `simulations.test.sql`, `journal_notes_library.test.sql` e `dashboards.test.sql` todos `ok`; `Result: PASS`. (`migration up` só aplica a pendente e mantém as contas locais; se reclamar de histórico, use `npx --yes supabase@2 db reset` e recrie as contas no E2E.)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add supabase/migrations/20260930000003_dashboards.sql supabase/tests/dashboards.test.sql
+git commit -m "feat(db): score series and activity views, mentor-only storage usage"
+```
+
+---
+
+### Task 46: Hooks dos painéis — **[W3]**
+
+**Files:**
+- Modify: `src/features/dashboard/hooks.ts` (troca o esqueleto)
+- Test: `src/features/dashboard/hooks.test.tsx`
+
+**Interfaces:**
+- Consumes: `supabase` (views `v_score_series`, `v_activity_days` e a RPC `storage_usage`, Task 45); `fail` (Task 36); tipos de linha da Task 44; `createFakeSupabase` (Task 36).
+- Produces: os 3 hooks do contrato da Task 44. Query keys internas: `['score_series']`, `['activity_days']`, `['storage_usage']`. Mensagem entregue às telas: "Só o mentor vê o uso do armazenamento.". Os números do banco (`numeric`, `bigint`) chegam como número ou texto e são convertidos com `Number()`.
+- Os painéis leem os dados a cada abertura (sem invalidação cruzada): nenhuma das outras áreas precisa saber que existem.
+
+- [ ] **Step 1: Testes**
+
+
+`src/features/dashboard/hooks.test.tsx`:
+```tsx
+import type { ReactNode } from 'react'
+import { renderHook, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import type { FakeSupabase } from '@/test/fakeSupabase'
+
+vi.mock('@/lib/supabase', async () => {
+  const { createFakeSupabase } = await import('@/test/fakeSupabase')
+  const fake = createFakeSupabase()
+  return { supabase: fake.supabase, fake }
+})
+
+const { fake } = (await import('@/lib/supabase')) as unknown as { fake: FakeSupabase }
+const { results, calls } = fake
+
+import { useActivityDays, useScoreSeries, useStorageUsage } from './hooks'
+
+function setup() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const Wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+  return { Wrapper }
+}
+
+beforeEach(() => fake.reset())
+
+test('useScoreSeries converte a linha e pede em ordem de dia', async () => {
+  results.v_score_series = [{ data: [{
+    simulation_id: 's1', mode: 'treino', difficulty: 'facil', phase: 'f1', is_boss: false, day: '2026-09-29', week_start: '2026-09-28',
+    student_total: 24, mentor_total: 18, abertura: '3.5', tom: 3.5, perguntas: 3, escuta: 3, objecao: 3, fechamento: 3, total_official: '21.0',
+  }], error: null }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useScoreSeries(), { wrapper: Wrapper })
+  await waitFor(() => expect(result.current.data).toHaveLength(1))
+  expect(result.current.data![0]).toEqual({
+    simulationId: 's1', day: '2026-09-29', weekStart: '2026-09-28', mode: 'treino', difficulty: 'facil', phase: 'f1', isBoss: false,
+    studentTotal: 24, mentorTotal: 18, official: 21,
+    byCriterion: { abertura: 3.5, tom: 3.5, perguntas: 3, escuta: 3, objecao: 3, fechamento: 3 },
+  })
+  expect(calls).toContainEqual({ table: 'v_score_series', method: 'order', args: ['day', { ascending: true }] })
+})
+
+test('useScoreSeries repassa o erro do banco', async () => {
+  results.v_score_series = [{ data: null, error: { message: 'boom', code: 'XX000' } }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useScoreSeries(), { wrapper: Wrapper })
+  await waitFor(() => expect(result.current.isError).toBe(true))
+})
+
+test('useActivityDays devolve os dias em ordem, com números de verdade', async () => {
+  results.v_activity_days = [{ data: [
+    { day: '2026-09-28', items: '1', simulations: 0, journal: true },
+    { day: '2026-09-29', items: 2, simulations: '3', journal: false },
+  ], error: null }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useActivityDays(), { wrapper: Wrapper })
+  await waitFor(() => expect(result.current.data).toHaveLength(2))
+  expect(result.current.data).toEqual([
+    { day: '2026-09-28', items: 1, simulations: 0, journal: true },
+    { day: '2026-09-29', items: 2, simulations: 3, journal: false },
+  ])
+  expect(calls).toContainEqual({ table: 'v_activity_days', method: 'order', args: ['day', { ascending: true }] })
+})
+
+test('useStorageUsage lê a RPC e ignora bucket desconhecido', async () => {
+  results['rpc:storage_usage'] = [{ data: [
+    { bucket: 'books', bytes: '1500', files: 2 },
+    { bucket: 'outro', bytes: 9, files: 1 },
+    { bucket: 'recordings', bytes: 200, files: 1 },
+  ], error: null }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useStorageUsage(), { wrapper: Wrapper })
+  await waitFor(() => expect(result.current.data).toHaveLength(2))
+  expect(result.current.data).toEqual([{ bucket: 'books', bytes: 1500, files: 2 }, { bucket: 'recordings', bytes: 200, files: 1 }])
+  expect(calls.some((c) => c.table === 'rpc:storage_usage')).toBe(true)
+})
+
+test('quem não é o mentor recebe mensagem clara (Review Focus 2)', async () => {
+  results['rpc:storage_usage'] = [{ data: null, error: { message: 'mentor_only', code: '42501' } }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useStorageUsage(), { wrapper: Wrapper })
+  await waitFor(() => expect(result.current.error?.message).toBe('Só o mentor vê o uso do armazenamento.'))
+})
+```
+
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/features/dashboard/hooks.test.tsx 2>&1 | tail -10`
+Expected: FAIL — `useScoreSeries: implementado na Task 46`.
+
+- [ ] **Step 3: Implementar**
+
+
+`src/features/dashboard/hooks.ts`:
+```ts
+import { useQuery } from '@tanstack/react-query'
+import type { ActivityDay, ScoreRow, StorageUsage } from '@/domain/dashboard'
+import { fail } from '@/lib/db'
+import { supabase } from '@/lib/supabase'
+
+type Num = number | string
+
+interface ScoreDb {
+  simulation_id: string; mode: ScoreRow['mode']; difficulty: ScoreRow['difficulty']; phase: ScoreRow['phase']; is_boss: boolean
+  day: string; week_start: string; student_total: Num; mentor_total: Num
+  abertura: Num; tom: Num; perguntas: Num; escuta: Num; objecao: Num; fechamento: Num; total_official: Num
+}
+
+const SCORE_COLUMNS = 'simulation_id, mode, difficulty, phase, is_boss, day, week_start, student_total, mentor_total, abertura, tom, perguntas, escuta, objecao, fechamento, total_official'
+
+/** RF-91–93: simulados com as duas fichas, do mais antigo ao mais novo (o RLS das fichas já esconde o resto). */
+export function useScoreSeries() {
+  return useQuery({
+    queryKey: ['score_series'],
+    queryFn: async (): Promise<ScoreRow[]> => {
+      const { data, error } = await supabase.from('v_score_series').select(SCORE_COLUMNS).order('day', { ascending: true })
+      if (error) throw error
+      return (data as unknown as ScoreDb[]).map((r) => ({
+        simulationId: r.simulation_id, day: r.day, weekStart: r.week_start, mode: r.mode, difficulty: r.difficulty, phase: r.phase, isBoss: r.is_boss,
+        studentTotal: Number(r.student_total), mentorTotal: Number(r.mentor_total), official: Number(r.total_official),
+        byCriterion: {
+          abertura: Number(r.abertura), tom: Number(r.tom), perguntas: Number(r.perguntas),
+          escuta: Number(r.escuta), objecao: Number(r.objecao), fechamento: Number(r.fechamento),
+        },
+      }))
+    },
+  })
+}
+
+/** RF-94/99a: um registro por dia com atividade da aluna (fuso de São Paulo, calculado no banco). */
+export function useActivityDays() {
+  return useQuery({
+    queryKey: ['activity_days'],
+    queryFn: async (): Promise<ActivityDay[]> => {
+      const { data, error } = await supabase.from('v_activity_days').select('day, items, simulations, journal').order('day', { ascending: true })
+      if (error) throw error
+      return (data as unknown as { day: string; items: Num; simulations: Num; journal: boolean }[])
+        .map((r) => ({ day: r.day, items: Number(r.items), simulations: Number(r.simulations), journal: r.journal }))
+    },
+  })
+}
+
+/** RNF-11: só o mentor (a RPC recusa a aluna). */
+export function useStorageUsage() {
+  return useQuery({
+    queryKey: ['storage_usage'],
+    queryFn: async (): Promise<StorageUsage[]> => {
+      const { data, error } = await supabase.rpc('storage_usage')
+      if (error) fail(error, { '42501': 'Só o mentor vê o uso do armazenamento.' })
+      return (data as { bucket: string; bytes: Num; files: Num }[])
+        .filter((r): r is { bucket: StorageUsage['bucket']; bytes: Num; files: Num } => r.bucket === 'books' || r.bucket === 'recordings')
+        .map((r) => ({ bucket: r.bucket, bytes: Number(r.bytes), files: Number(r.files) }))
+    },
+  })
+}
+```
+
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npx vitest run src/features/dashboard 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS; `tsc` sem erros.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/features/dashboard/hooks.ts src/features/dashboard/hooks.test.tsx
+git commit -m "feat(e7): supabase hooks for score series, activity days and storage usage"
+```
+
+---
+
+### Task 47: Recharts, `ChartFrame`, evolução das notas e autoavaliação × mentor — **[W4]**
+
+**Files:**
+- Modify: `package.json`, `package-lock.json` (instala `recharts@^3`)
+- Create: `src/features/dashboard/chartTheme.ts`, `src/features/dashboard/ChartFrame.tsx`, `src/features/dashboard/EvolutionChart.tsx`, `src/features/dashboard/PerceptionChart.tsx`
+- Test: `src/features/dashboard/ChartFrame.test.tsx`, `src/features/dashboard/EvolutionChart.test.tsx`, `src/features/dashboard/PerceptionChart.test.tsx`
+
+**Interfaces:**
+- Consumes: `WeekPoint`, `PerceptionPoint`, `evolutionSummary`, `perceptionSummary`, `formatScore`, `shortDate`, `SCORE_GOALS`, `SCORE_RANGE` (Task 44); `Card` (`@/design/ui`); tokens de `src/design/tokens.css`.
+- Produces:
+  - `CHART` e `TICK`, `TOOLTIP_STYLE` (`chartTheme.ts`): cores como `var(--color-…)` (nenhum hex).
+  - `ChartFrame({ title, summary, table?, children? })`: cartão com `<h2>`, o resumo em texto sempre visível, o gráfico (`children`) em um bloco `aria-hidden` e, se houver `table` (`{ head: string[]; rows: (string | number)[][] }`), um `<details>` "Ver os dados em tabela". Sem `children` e sem `table`, mostra só título e resumo (estado vazio).
+  - `EvolutionChart({ points: WeekPoint[] })` (RF-91): linha da média oficial por semana, com linhas de referência em 15 e 22.
+  - `PerceptionChart({ points: PerceptionPoint[]; viewer: 'mentor' | 'aluna' })` (RF-92): duas linhas (autoavaliação e nota do mentor) com traço e marcador diferentes.
+- Nenhum gráfico anima (`isAnimationActive={false}`, RNF-06) e o SVG fica em `aria-hidden`: quem lê a tela usa o resumo e a tabela.
+
+- [ ] **Step 1: Instalar o Recharts**
+
+Run: `npm install recharts@^3 2>&1 | tail -3 && grep '"recharts"' package.json`
+Expected: a linha `"recharts": "^3.…"` em `dependencies` (Recharts já é do Tech Stack, então não é dependência nova). Confira que `node_modules/recharts/types/component/ResponsiveContainer.d.ts` tem `initialDimension` (usado abaixo para o primeiro desenho e para o jsdom).
+
+- [ ] **Step 2: Testes**
+
+
+`src/features/dashboard/ChartFrame.test.tsx`:
+```tsx
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { ChartFrame } from './ChartFrame'
+
+test('estado vazio: título e resumo, sem gráfico nem tabela', () => {
+  const { container } = render(<ChartFrame title="Evolução das notas" summary="Ainda não há simulados." />)
+  expect(screen.getByRole('heading', { level: 2, name: 'Evolução das notas' })).toBeInTheDocument()
+  expect(screen.getByText('Ainda não há simulados.')).toBeVisible()
+  expect(screen.queryByText('Ver os dados em tabela')).not.toBeInTheDocument()
+  expect(container.querySelector('[aria-hidden="true"]')).toBeNull()
+})
+
+test('com gráfico e tabela: o gráfico fica escondido dos leitores de tela e os dados viram tabela', async () => {
+  const { container } = render(
+    <ChartFrame title="T" summary="Resumo" table={{ head: ['Semana', 'Média'], rows: [['21/09', '17,0'], ['28/09', '18,5']] }}>
+      <svg data-testid="grafico" />
+    </ChartFrame>,
+  )
+  expect(container.querySelector('[aria-hidden="true"]')).toContainElement(screen.getByTestId('grafico'))
+  await userEvent.click(screen.getByText('Ver os dados em tabela'))
+  expect(screen.getByRole('table', { name: 'T' })).toBeInTheDocument()
+  expect(screen.getByRole('columnheader', { name: 'Média' })).toBeInTheDocument()
+  expect(screen.getByRole('row', { name: /28\/09.*18,5/ })).toBeInTheDocument()
+})
+```
+
+`src/features/dashboard/EvolutionChart.test.tsx`:
+```tsx
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { EvolutionChart } from './EvolutionChart'
+
+beforeAll(() => { vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} }) })
+afterAll(() => { vi.unstubAllGlobals() })
+
+test('sem simulados: só o texto de vazio (Review Focus 4)', () => {
+  const { container } = render(<EvolutionChart points={[]} />)
+  expect(screen.getByRole('heading', { level: 2, name: 'Evolução das notas' })).toBeInTheDocument()
+  expect(screen.getByText('Ainda não há simulados com as duas fichas.')).toBeVisible()
+  expect(container.querySelector('.recharts-responsive-container')).toBeNull()
+  expect(screen.queryByText('Ver os dados em tabela')).not.toBeInTheDocument()
+})
+
+test('uma semana só: resumo com as metas, contêiner do gráfico e tabela (Review Focus 5)', async () => {
+  const { container } = render(<EvolutionChart points={[{ weekStart: '2026-09-21', avg: 17, count: 2 }]} />)
+  expect(screen.getByText('Semana de 21/09: média oficial 17,0 em 2 simulados. Meta 15: atingida. Meta 22: faltam 5,0.')).toBeVisible()
+  expect(container.querySelector('.recharts-responsive-container')).not.toBeNull()
+  await userEvent.click(screen.getByText('Ver os dados em tabela'))
+  expect(screen.getByRole('row', { name: /Semana de 21\/09.*17,0.*2/ })).toBeInTheDocument()
+})
+
+test('várias semanas: uma linha de tabela por semana, da mais antiga à mais nova', async () => {
+  render(<EvolutionChart points={[
+    { weekStart: '2026-09-14', avg: 12, count: 1 }, { weekStart: '2026-09-21', avg: 16.5, count: 3 },
+  ]} />)
+  await userEvent.click(screen.getByText('Ver os dados em tabela'))
+  const rows = screen.getAllByRole('row').slice(1)
+  expect(rows).toHaveLength(2)
+  expect(rows[0]).toHaveTextContent('Semana de 14/09')
+  expect(rows[1]).toHaveTextContent('16,5')
+})
+```
+
+`src/features/dashboard/PerceptionChart.test.tsx`:
+```tsx
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { PerceptionChart } from './PerceptionChart'
+
+beforeAll(() => { vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} }) })
+afterAll(() => { vi.unstubAllGlobals() })
+
+const pts = [
+  { simulationId: 'a', day: '2026-09-20', student: 16, mentor: 20, gap: -4 },
+  { simulationId: 'b', day: '2026-09-29', student: 24, mentor: 20, gap: 4 },
+]
+
+test('vazio', () => {
+  const { container } = render(<PerceptionChart points={[]} viewer="mentor" />)
+  expect(screen.getByRole('heading', { level: 2, name: 'Autoavaliação × mentor' })).toBeInTheDocument()
+  expect(screen.getByText('Ainda não há simulados com as duas fichas.')).toBeVisible()
+  expect(container.querySelector('.recharts-responsive-container')).toBeNull()
+})
+
+test('o texto muda com quem olha: mentor fala "ela", aluna fala "você"', () => {
+  const { rerender } = render(<PerceptionChart points={pts.slice(1)} viewer="mentor" />)
+  expect(screen.getByText('Ela se avalia, em média, 4,0 pontos acima da nota do mentor.')).toBeVisible()
+  rerender(<PerceptionChart points={pts.slice(1)} viewer="aluna" />)
+  expect(screen.getByText('Você se avalia, em média, 4,0 pontos acima da nota do mentor.')).toBeVisible()
+})
+
+test('tabela com as duas notas e a diferença de cada simulado', async () => {
+  const { container } = render(<PerceptionChart points={pts} viewer="mentor" />)
+  expect(container.querySelector('.recharts-responsive-container')).not.toBeNull()
+  await userEvent.click(screen.getByText('Ver os dados em tabela'))
+  expect(screen.getByRole('columnheader', { name: 'Autoavaliação dela' })).toBeInTheDocument()
+  expect(screen.getByRole('row', { name: /20\/09.*16.*20.*-4/ })).toBeInTheDocument()
+  expect(screen.getByRole('row', { name: /29\/09.*24.*20.*\+4/ })).toBeInTheDocument()
+})
+
+test('para a aluna a coluna se chama "Sua autoavaliação"', async () => {
+  render(<PerceptionChart points={pts} viewer="aluna" />)
+  await userEvent.click(screen.getByText('Ver os dados em tabela'))
+  expect(screen.getByRole('columnheader', { name: 'Sua autoavaliação' })).toBeInTheDocument()
+})
+```
+
+
+- [ ] **Step 3: Rodar e ver falhar**
+
+Run: `npx vitest run src/features/dashboard/ChartFrame.test.tsx src/features/dashboard/EvolutionChart.test.tsx src/features/dashboard/PerceptionChart.test.tsx 2>&1 | tail -12`
+Expected: FAIL — `Failed to resolve import "./ChartFrame"` (e os outros).
+
+- [ ] **Step 4: Implementar**
+
+
+`src/features/dashboard/chartTheme.ts`:
+```ts
+/** Cores dos gráficos: só tokens do tema (src/design/tokens.css), resolvidos pelo navegador via var(). */
+export const CHART = {
+  grid: 'var(--color-edge)',
+  axis: 'var(--color-line)',
+  text: 'var(--color-muted)',
+  ink: 'var(--color-ink)',
+  official: 'var(--color-brand-strong)',
+  student: 'var(--color-f2)',
+  mentor: 'var(--color-f3)',
+  goalF2: 'var(--color-success)',
+  goalF4: 'var(--color-streak)',
+} as const
+
+export const TICK = { fill: CHART.text, fontSize: 12 } as const
+
+export const TOOLTIP_STYLE = {
+  background: 'var(--color-raised)',
+  border: '1px solid var(--color-edge)',
+  borderRadius: 8,
+  color: 'var(--color-ink)',
+} as const
+
+/** Tamanho do primeiro desenho (antes de medir a tela) e do jsdom. */
+export const INITIAL = { width: 320, height: 240 } as const
+```
+
+`src/features/dashboard/ChartFrame.tsx`:
+```tsx
+import { useId, type ReactNode } from 'react'
+import { Card } from '@/design/ui'
+
+export interface ChartTable { head: string[]; rows: (string | number)[][] }
+
+/** Cartão de gráfico com alternativa acessível: resumo em texto sempre visível e tabela com os dados; o SVG é só decoração. */
+export function ChartFrame({ title, summary, table, children }: { title: string; summary: string; table?: ChartTable; children?: ReactNode }) {
+  const id = useId()
+  return (
+    <section aria-labelledby={id}>
+      <Card className="flex flex-col gap-3">
+        <h2 id={id} className="text-lg font-bold">{title}</h2>
+        <p className="text-sm text-muted">{summary}</p>
+        {children && <div aria-hidden className="h-60 w-full">{children}</div>}
+        {table && (
+          <details className="text-sm">
+            <summary className="w-fit cursor-pointer font-bold text-brand underline underline-offset-4">Ver os dados em tabela</summary>
+            <div className="mt-2 overflow-x-auto">
+              <table className="w-full border-collapse text-left">
+                <caption className="sr-only">{title}</caption>
+                <thead>
+                  <tr>{table.head.map((h) => <th key={h} scope="col" className="border-b border-edge py-1 pr-3 font-bold">{h}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {table.rows.map((r, i) => (
+                    <tr key={i}>
+                      {r.map((cell, j) => (j === 0
+                        ? <th key={j} scope="row" className="border-b border-edge py-1 pr-3 font-normal">{cell}</th>
+                        : <td key={j} className="border-b border-edge py-1 pr-3 tabular-nums">{cell}</td>))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        )}
+      </Card>
+    </section>
+  )
+}
+```
+
+`src/features/dashboard/EvolutionChart.tsx`:
+```tsx
+import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { evolutionSummary, formatScore, SCORE_GOALS, SCORE_RANGE, shortDate, type WeekPoint } from '@/domain/dashboard'
+import { ChartFrame } from './ChartFrame'
+import { CHART, INITIAL, TICK, TOOLTIP_STYLE } from './chartTheme'
+
+/** RF-91: média oficial por semana, com as metas 15 (Fase 2) e 22 (Fase 4). */
+export function EvolutionChart({ points }: { points: WeekPoint[] }) {
+  const data = points.map((p) => ({ label: shortDate(p.weekStart), avg: p.avg }))
+  return (
+    <ChartFrame
+      title="Evolução das notas"
+      summary={evolutionSummary(points)}
+      table={points.length === 0 ? undefined : {
+        head: ['Semana', 'Média oficial', 'Simulados'],
+        rows: points.map((p) => [`Semana de ${shortDate(p.weekStart)}`, formatScore(p.avg), p.count]),
+      }}
+    >
+      {points.length > 0 && (
+        <ResponsiveContainer width="100%" height="100%" initialDimension={INITIAL}>
+          <LineChart data={data} margin={{ top: 8, right: 16, bottom: 0, left: -16 }}>
+            <CartesianGrid stroke={CHART.grid} strokeDasharray="2 4" />
+            <XAxis dataKey="label" tick={TICK} stroke={CHART.axis} />
+            <YAxis domain={[SCORE_RANGE.min, SCORE_RANGE.max]} tick={TICK} stroke={CHART.axis} />
+            <ReferenceLine y={SCORE_GOALS.f2} stroke={CHART.goalF2} strokeDasharray="6 3"
+              label={{ value: 'Meta 15', fill: CHART.goalF2, fontSize: 12, position: 'insideBottomLeft' }} />
+            <ReferenceLine y={SCORE_GOALS.f4} stroke={CHART.goalF4} strokeDasharray="2 3"
+              label={{ value: 'Meta 22', fill: CHART.goalF4, fontSize: 12, position: 'insideTopLeft' }} />
+            <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v) => formatScore(Number(v))} />
+            <Line type="monotone" dataKey="avg" name="Média oficial" stroke={CHART.official} strokeWidth={3}
+              dot={{ r: 4, fill: CHART.official, stroke: CHART.official }} isAnimationActive={false} />
+          </LineChart>
+        </ResponsiveContainer>
+      )}
+    </ChartFrame>
+  )
+}
+```
+
+`src/features/dashboard/PerceptionChart.tsx`:
+```tsx
+import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { perceptionSummary, SCORE_RANGE, shortDate, type PerceptionPoint } from '@/domain/dashboard'
+import { ChartFrame } from './ChartFrame'
+import { CHART, INITIAL, TICK, TOOLTIP_STYLE } from './chartTheme'
+
+const signed = (n: number) => (n > 0 ? `+${n}` : String(n))
+
+/** RF-92: a nota que ela se deu e a do mentor em cada simulado. As duas linhas se distinguem também por traço e marcador. */
+export function PerceptionChart({ points, viewer }: { points: PerceptionPoint[]; viewer: 'mentor' | 'aluna' }) {
+  const studentName = viewer === 'mentor' ? 'Autoavaliação dela' : 'Sua autoavaliação'
+  const data = points.map((p) => ({ label: shortDate(p.day), student: p.student, mentor: p.mentor }))
+  return (
+    <ChartFrame
+      title="Autoavaliação × mentor"
+      summary={perceptionSummary(points, viewer)}
+      table={points.length === 0 ? undefined : {
+        head: ['Simulado', studentName, 'Nota do mentor', 'Diferença'],
+        rows: points.map((p) => [shortDate(p.day), p.student, p.mentor, signed(p.gap)]),
+      }}
+    >
+      {points.length > 0 && (
+        <ResponsiveContainer width="100%" height="100%" initialDimension={INITIAL}>
+          <LineChart data={data} margin={{ top: 8, right: 16, bottom: 0, left: -16 }}>
+            <CartesianGrid stroke={CHART.grid} strokeDasharray="2 4" />
+            <XAxis dataKey="label" tick={TICK} stroke={CHART.axis} />
+            <YAxis domain={[SCORE_RANGE.min, SCORE_RANGE.max]} tick={TICK} stroke={CHART.axis} />
+            <Tooltip contentStyle={TOOLTIP_STYLE} />
+            <Legend wrapperStyle={{ color: CHART.text, fontSize: 12 }} />
+            <Line type="monotone" dataKey="student" name={studentName} stroke={CHART.student} strokeWidth={3}
+              dot={{ r: 4, fill: CHART.student, stroke: CHART.student }} isAnimationActive={false} />
+            <Line type="monotone" dataKey="mentor" name="Nota do mentor" stroke={CHART.mentor} strokeWidth={3} strokeDasharray="6 4"
+              dot={{ r: 4, fill: 'var(--color-bg)', stroke: CHART.mentor, strokeWidth: 2 }} isAnimationActive={false} />
+          </LineChart>
+        </ResponsiveContainer>
+      )}
+    </ChartFrame>
+  )
+}
+```
+
+
+- [ ] **Step 5: Rodar e ver passar**
+
+Run: `npx vitest run src/features/dashboard/ChartFrame.test.tsx src/features/dashboard/EvolutionChart.test.tsx src/features/dashboard/PerceptionChart.test.tsx 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS; `tsc` sem erros. (No jsdom não há layout, então o Recharts não desenha o SVG: os testes conferem o contêiner `.recharts-responsive-container`, o resumo e a tabela. O desenho de verdade é conferido no navegador na Task 53. Se o Recharts avisar no console sobre largura/altura zero, é só aviso.)
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add package.json package-lock.json src/features/dashboard/chartTheme.ts src/features/dashboard/ChartFrame.tsx src/features/dashboard/ChartFrame.test.tsx src/features/dashboard/EvolutionChart.tsx src/features/dashboard/EvolutionChart.test.tsx src/features/dashboard/PerceptionChart.tsx src/features/dashboard/PerceptionChart.test.tsx
+git commit -m "feat(e7): chart frame with text and table alternatives, score evolution and self-vs-mentor charts"
+```
+
+---
+
+### Task 48: Radar por critério e barras de checklist por fase — **[W4]**
+
+**Files:**
+- Create: `src/features/dashboard/CriteriaRadar.tsx`, `src/features/dashboard/ChecklistBars.tsx`
+- Test: `src/features/dashboard/CriteriaRadar.test.tsx`, `src/features/dashboard/ChecklistBars.test.tsx`
+
+**Interfaces:**
+- Consumes: `RadarPoint`, `PhaseProgress`, `radarSummary`, `trailPercent`, `formatScore` (Task 44); `ChartFrame`, `CHART`, `INITIAL`, `TICK`, `TOOLTIP_STYLE` (Task 47); `Card`, `ProgressBar` (`@/design/ui`).
+- Produces:
+  - `CriteriaRadar({ points: RadarPoint[] })` (RF-93): radar dos 6 critérios (escala 0 a 5) com "Últimas 4 semanas" (preenchido) e "Período anterior" (só contorno tracejado, some se não houver dados); dentro de `ChartFrame`, com resumo e tabela.
+  - `ChecklistBars({ progress: PhaseProgress[] })` (RF-95): uma barra por fase (`ProgressBar` com o tom da fase), "x de y" ao lado e o percentual geral da trilha no texto. Sem Recharts.
+
+- [ ] **Step 1: Testes**
+
+
+`src/features/dashboard/CriteriaRadar.test.tsx`:
+```tsx
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { radarByCriterion } from '@/domain/dashboard'
+import { scoreRowOf } from '@/test/dashboardMocks'
+import { CriteriaRadar } from './CriteriaRadar'
+
+beforeAll(() => { vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} }) })
+afterAll(() => { vi.unstubAllGlobals() })
+
+const rows = [
+  scoreRowOf({ simulationId: 'r', day: '2026-09-30', byCriterion: { abertura: 4, tom: 3, perguntas: 3, escuta: 3, objecao: 3, fechamento: 3 } }),
+  scoreRowOf({ simulationId: 'p', day: '2026-09-02' }),
+]
+
+test('sem simulados nas últimas 4 semanas: texto de vazio e nenhum gráfico (Review Focus 4)', () => {
+  const { container } = render(<CriteriaRadar points={radarByCriterion([], '2026-09-30')} />)
+  expect(screen.getByRole('heading', { level: 2, name: 'Radar por critério' })).toBeInTheDocument()
+  expect(screen.getByText('Sem simulados com as duas fichas nas últimas 4 semanas.')).toBeVisible()
+  expect(container.querySelector('.recharts-responsive-container')).toBeNull()
+})
+
+test('com dados: resumo dos seis critérios, gráfico e tabela com as duas colunas', async () => {
+  const { container } = render(<CriteriaRadar points={radarByCriterion(rows, '2026-09-30')} />)
+  expect(screen.getByText(/Últimas 4 semanas: Abertura 4,0 \(antes 3,0\); Tom e energia 3,0 \(antes 3,0\)/)).toBeVisible()
+  expect(container.querySelector('.recharts-responsive-container')).not.toBeNull()
+  await userEvent.click(screen.getByText('Ver os dados em tabela'))
+  expect(screen.getByRole('columnheader', { name: 'Últimas 4 semanas' })).toBeInTheDocument()
+  expect(screen.getByRole('columnheader', { name: 'Período anterior' })).toBeInTheDocument()
+  expect(screen.getByRole('row', { name: /Abertura.*4,0.*3,0/ })).toBeInTheDocument()
+})
+
+test('sem período anterior a tabela mostra travessão, não zero', async () => {
+  render(<CriteriaRadar points={radarByCriterion([scoreRowOf({ day: '2026-09-30' })], '2026-09-30')} />)
+  await userEvent.click(screen.getByText('Ver os dados em tabela'))
+  expect(screen.getByRole('row', { name: /Abertura.*3,0.*—/ })).toBeInTheDocument()
+})
+```
+
+`src/features/dashboard/ChecklistBars.test.tsx`:
+```tsx
+import { render, screen, within } from '@testing-library/react'
+import { phaseProgress } from '@/domain/dashboard'
+import { ChecklistBars } from './ChecklistBars'
+
+test('uma barra por fase com "x de y" e o percentual geral da trilha (RF-95)', () => {
+  const progress = phaseProgress(new Set(), new Set())
+  render(<ChecklistBars progress={progress} />)
+  expect(screen.getByRole('heading', { level: 2, name: 'Checklists por fase' })).toBeInTheDocument()
+  expect(screen.getByText(/0% da trilha concluída/)).toBeVisible()
+  expect(screen.getAllByRole('progressbar')).toHaveLength(4)
+  expect(screen.getByRole('progressbar', { name: 'Progresso da Fase 2' })).toHaveAttribute('aria-valuenow', '0')
+  expect(screen.getByText('Fase 2 · Vendas')).toBeVisible()
+  const fase2 = screen.getByText('Fase 2 · Vendas').closest('li')!
+  expect(within(fase2).getByText(`0 de ${progress[1].total}`)).toBeVisible()
+})
+
+test('progresso parcial aparece na barra e no texto', () => {
+  const progress = [
+    { phase: 'f1' as const, title: 'Comunicação', done: 6, total: 12, ratio: 0.5 },
+    { phase: 'f2' as const, title: 'Vendas', done: 0, total: 12, ratio: 0 },
+  ]
+  render(<ChecklistBars progress={progress} />)
+  expect(screen.getByText(/25% da trilha concluída/)).toBeVisible()
+  expect(screen.getByRole('progressbar', { name: 'Progresso da Fase 1' })).toHaveAttribute('aria-valuenow', '50')
+  expect(screen.getByText('6 de 12')).toBeVisible()
+})
+
+test('lista vazia não quebra', () => {
+  render(<ChecklistBars progress={[]} />)
+  expect(screen.getByText(/0% da trilha concluída/)).toBeVisible()
+  expect(screen.queryAllByRole('progressbar')).toHaveLength(0)
+})
+```
+
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/features/dashboard/CriteriaRadar.test.tsx src/features/dashboard/ChecklistBars.test.tsx 2>&1 | tail -10`
+Expected: FAIL — `Failed to resolve import "./CriteriaRadar"` e `"./ChecklistBars"`.
+
+- [ ] **Step 3: Implementar**
+
+
+`src/features/dashboard/CriteriaRadar.tsx`:
+```tsx
+import { Legend, PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart, ResponsiveContainer, Tooltip } from 'recharts'
+import { formatScore, radarSummary, type RadarPoint } from '@/domain/dashboard'
+import { ChartFrame } from './ChartFrame'
+import { CHART, INITIAL, TICK, TOOLTIP_STYLE } from './chartTheme'
+
+const cell = (n: number | null) => (n === null ? '—' : formatScore(n))
+
+/** RF-93: média oficial em cada um dos 6 critérios, últimas 4 semanas contra as 4 anteriores (escala de 1 a 5). */
+export function CriteriaRadar({ points }: { points: RadarPoint[] }) {
+  const hasRecent = points.some((p) => p.recent !== null)
+  const hasPrevious = points.some((p) => p.previous !== null)
+  const data = points.map((p) => ({ label: p.label, recent: p.recent ?? 0, previous: p.previous ?? 0 }))
+  return (
+    <ChartFrame
+      title="Radar por critério"
+      summary={radarSummary(points)}
+      table={hasRecent ? {
+        head: ['Critério', 'Últimas 4 semanas', 'Período anterior'],
+        rows: points.map((p) => [p.label, cell(p.recent), cell(p.previous)]),
+      } : undefined}
+    >
+      {hasRecent && (
+        <ResponsiveContainer width="100%" height="100%" initialDimension={INITIAL}>
+          <RadarChart data={data} outerRadius="70%">
+            <PolarGrid stroke={CHART.grid} />
+            <PolarAngleAxis dataKey="label" tick={TICK} />
+            <PolarRadiusAxis angle={90} domain={[0, 5]} tickCount={6} tick={TICK} stroke={CHART.axis} />
+            <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v) => formatScore(Number(v))} />
+            <Legend wrapperStyle={{ color: CHART.text, fontSize: 12 }} />
+            {hasPrevious && (
+              <Radar name="Período anterior" dataKey="previous" stroke={CHART.mentor} strokeWidth={2} strokeDasharray="6 4"
+                fill="none" isAnimationActive={false} />
+            )}
+            <Radar name="Últimas 4 semanas" dataKey="recent" stroke={CHART.official} strokeWidth={3}
+              fill={CHART.official} fillOpacity={0.25} isAnimationActive={false} />
+          </RadarChart>
+        </ResponsiveContainer>
+      )}
+    </ChartFrame>
+  )
+}
+```
+
+`src/features/dashboard/ChecklistBars.tsx`:
+```tsx
+import { useId } from 'react'
+import { Card, ProgressBar } from '@/design/ui'
+import { trailPercent, type PhaseProgress } from '@/domain/dashboard'
+
+/** RF-95: % concluído por fase (itens obrigatórios das semanas + itens do portão). */
+export function ChecklistBars({ progress }: { progress: PhaseProgress[] }) {
+  const id = useId()
+  const percent = Math.round(trailPercent(progress) * 100)
+  return (
+    <section aria-labelledby={id}>
+      <Card className="flex flex-col gap-4">
+        <h2 id={id} className="text-lg font-bold">Checklists por fase</h2>
+        <p className="text-sm text-muted">{percent}% da trilha concluída (itens obrigatórios das semanas e itens de portão).</p>
+        <ul className="flex flex-col gap-3">
+          {progress.map((p) => (
+            <li key={p.phase} className="flex flex-col gap-1">
+              <div className="flex items-baseline justify-between gap-2 text-sm">
+                <span className="font-bold">Fase {p.phase.slice(1)} · {p.title}</span>
+                <span className="tabular-nums text-muted">{p.done} de {p.total}</span>
+              </div>
+              <ProgressBar value={p.ratio} label={`Progresso da Fase ${p.phase.slice(1)}`} tone={p.phase} />
+            </li>
+          ))}
+        </ul>
+      </Card>
+    </section>
+  )
+}
+```
+
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npx vitest run src/features/dashboard/CriteriaRadar.test.tsx src/features/dashboard/ChecklistBars.test.tsx 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS; `tsc` sem erros.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/features/dashboard/CriteriaRadar.tsx src/features/dashboard/CriteriaRadar.test.tsx src/features/dashboard/ChecklistBars.tsx src/features/dashboard/ChecklistBars.test.tsx
+git commit -m "feat(e7): criteria radar and phase checklist bars"
+```
+
+---
+
+### Task 49: `ActivityHeatmap` — mapa de calor de atividade — **[W1 · Codex]**
+
+> **Tarefa pequena e fechada para o Codex:** o código dos dois arquivos está pronto abaixo; copie exatamente, rode os dois comandos e faça o commit. Não altere nenhum outro arquivo (nem `src/domain/dashboard.ts`, que é do W3), não renomeie nada e não acrescente estilo novo.
+
+**Files:**
+- Create: `src/features/dashboard/ActivityHeatmap.tsx`
+- Test: `src/features/dashboard/ActivityHeatmap.test.tsx`
+
+**Interfaces:**
+- Consumes: `heatmapSummary`, `shortDate`, `HeatCell`, `HeatKind` (Task 44; `heatmapWeeks` gera as `weeks`); `Card` (`@/design/ui`); tokens `bg-brand`, `bg-raised`, `bg-bg`, `border-brand`, `border-streak`.
+- Produces: `ActivityHeatmap({ weeks }: { weeks: HeatCell[][] })` (RF-94, RF-99a): grade de 7 linhas com uma coluna por semana (segunda em cima), título "Atividade", resumo em texto, legenda de 3 itens e `<details>` "Ver os dias em lista". Dia com atividade **e** caderno = quadrado cheio (`bg-brand`); dia com atividade **sem** caderno = quadrado com contorno laranja vazado (`border-streak`, sem preenchimento): a diferença não depende só da cor. A grade é `aria-hidden` (o resumo e a lista dão o mesmo dado).
+
+- [ ] **Step 1: Teste**
+
+
+`src/features/dashboard/ActivityHeatmap.test.tsx`:
+```tsx
+import { render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { heatmapWeeks } from '@/domain/dashboard'
+import { ActivityHeatmap } from './ActivityHeatmap'
+
+const weeks = heatmapWeeks([
+  { day: '2026-09-29', items: 2, simulations: 0, journal: true },
+  { day: '2026-09-30', items: 1, simulations: 1, journal: false },
+], '2026-09-30', 2)
+
+test('título, resumo em texto e legenda com os três tipos de dia', () => {
+  render(<ActivityHeatmap weeks={weeks} />)
+  expect(screen.getByRole('heading', { level: 2, name: 'Atividade' })).toBeInTheDocument()
+  expect(screen.getByText('2 dias com atividade: 1 com caderno e 1 sem caderno.')).toBeVisible()
+  const legend = screen.getByRole('list', { name: 'Legenda' })
+  expect(within(legend).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['Com caderno', 'Sem caderno', 'Sem atividade'])
+})
+
+test('uma célula por dia, com o tipo no data-kind', () => {
+  const { container } = render(<ActivityHeatmap weeks={weeks} />)
+  const kinds = [...container.querySelectorAll('[data-kind]')].map((c) => c.getAttribute('data-kind'))
+  expect(kinds).toHaveLength(14)
+  const count = (k: string) => kinds.filter((x) => x === k).length
+  expect(count('journal')).toBe(1)
+  expect(count('no_journal')).toBe(1)
+  expect(count('future')).toBe(4) // 01/10 a 04/10
+  expect(count('none')).toBe(8)
+})
+
+test('dia sem caderno tem contorno vazado, não só outra cor (Review Focus 5)', () => {
+  const { container } = render(<ActivityHeatmap weeks={weeks} />)
+  const withJournal = container.querySelector('[data-kind="journal"]')!
+  const without = container.querySelector('[data-kind="no_journal"]')!
+  expect(withJournal.className).toContain('bg-brand')
+  expect(without.className).toContain('border-streak')
+  expect(without.className).not.toContain('bg-streak')
+  expect(without.className).not.toContain('bg-brand')
+})
+
+test('a grade fica escondida dos leitores de tela e a lista traz os mesmos dias, do mais novo ao mais antigo', async () => {
+  const { container } = render(<ActivityHeatmap weeks={weeks} />)
+  expect(container.querySelector('[data-kind]')!.closest('[aria-hidden="true"]')).not.toBeNull()
+  await userEvent.click(screen.getByText('Ver os dias em lista'))
+  const items = screen.getAllByRole('listitem').filter((li) => /\d{2}\/\d{2} ·/.test(li.textContent ?? ''))
+  expect(items.map((li) => li.textContent)).toEqual([
+    '30/09 · sem caderno · 1 item, 1 simulado',
+    '29/09 · com caderno · 2 itens',
+  ])
+})
+
+test('sem atividade: só a mensagem, sem lista (Review Focus 4)', () => {
+  render(<ActivityHeatmap weeks={heatmapWeeks([], '2026-09-30', 2)} />)
+  expect(screen.getByText('Nenhuma atividade no período.')).toBeVisible()
+  expect(screen.queryByText('Ver os dias em lista')).not.toBeInTheDocument()
+})
+```
+
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/features/dashboard/ActivityHeatmap.test.tsx 2>&1 | tail -8`
+Expected: FAIL — `Failed to resolve import "./ActivityHeatmap"`.
+
+- [ ] **Step 3: Implementar**
+
+
+`src/features/dashboard/ActivityHeatmap.tsx`:
+```tsx
+import { useId } from 'react'
+import { Card } from '@/design/ui'
+import { heatmapSummary, shortDate, type HeatCell, type HeatKind } from '@/domain/dashboard'
+
+// Contorno sempre presente para o tamanho não mudar; "sem caderno" é vazado (borda laranja, sem preenchimento).
+const CELL: Record<HeatKind, string> = {
+  future: 'border-2 border-transparent',
+  none: 'border-2 border-transparent bg-raised',
+  journal: 'border-2 border-brand bg-brand',
+  no_journal: 'border-2 border-streak bg-bg',
+}
+
+const KIND_LABEL: Partial<Record<HeatKind, string>> = { journal: 'com caderno', no_journal: 'sem caderno' }
+
+const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
+
+function detail(c: HeatCell): string {
+  const what = [
+    c.items > 0 ? count(c.items, 'item', 'itens') : null,
+    c.simulations > 0 ? count(c.simulations, 'simulado', 'simulados') : null,
+  ].filter((x) => x !== null).join(', ')
+  return [KIND_LABEL[c.kind], what].filter(Boolean).join(' · ')
+}
+
+/** RF-94 e RF-99a: atividade dos últimos dias; os dias com atividade e sem caderno completo aparecem com contorno vazado. */
+export function ActivityHeatmap({ weeks }: { weeks: HeatCell[][] }) {
+  const id = useId()
+  const summary = heatmapSummary(weeks)
+  const active = weeks.flat().filter((c) => c.kind === 'journal' || c.kind === 'no_journal').reverse()
+  return (
+    <section aria-labelledby={id}>
+      <Card className="flex flex-col gap-3">
+        <h2 id={id} className="text-lg font-bold">Atividade</h2>
+        <p className="text-sm text-muted">{summary.text}</p>
+        <div aria-hidden className="overflow-x-auto pb-1">
+          <div className="grid w-max grid-flow-col grid-rows-7 gap-[3px]">
+            {weeks.flat().map((c) => (
+              <span key={c.date} data-kind={c.kind} title={shortDate(c.date)} className={`size-3 rounded-[2px] ${CELL[c.kind]}`} />
+            ))}
+          </div>
+        </div>
+        <ul aria-label="Legenda" className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
+          <li className="flex items-center gap-1.5"><span aria-hidden className={`size-3 rounded-[2px] ${CELL.journal}`} />Com caderno</li>
+          <li className="flex items-center gap-1.5"><span aria-hidden className={`size-3 rounded-[2px] ${CELL.no_journal}`} />Sem caderno</li>
+          <li className="flex items-center gap-1.5"><span aria-hidden className={`size-3 rounded-[2px] ${CELL.none}`} />Sem atividade</li>
+        </ul>
+        {active.length > 0 && (
+          <details className="text-sm">
+            <summary className="w-fit cursor-pointer font-bold text-brand underline underline-offset-4">Ver os dias em lista</summary>
+            <ul className="mt-2 flex flex-col gap-1 tabular-nums">
+              {active.map((c) => <li key={c.date}>{shortDate(c.date)} · {detail(c)}</li>)}
+            </ul>
+          </details>
+        )}
+      </Card>
+    </section>
+  )
+}
+```
+
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npx vitest run src/features/dashboard/ActivityHeatmap.test.tsx 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS; `tsc` sem erros.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/features/dashboard/ActivityHeatmap.tsx src/features/dashboard/ActivityHeatmap.test.tsx
+git commit -m "feat(e7): activity heatmap with hollow marker for days without journal"
+```
+
+---
+
+### Task 50: Cabeçalho, caderno em dia e uso do Storage — **[W4]**
+
+**Files:**
+- Create: `src/features/dashboard/DashboardHeader.tsx`, `src/features/dashboard/JournalCompliance.tsx`, `src/features/dashboard/StorageCard.tsx`
+- Test: `src/features/dashboard/DashboardHeader.test.tsx`, `src/features/dashboard/JournalCompliance.test.tsx`, `src/features/dashboard/StorageCard.test.tsx`
+
+**Interfaces:**
+- Consumes: `HeaderFacts`, `JournalOverview`, `StorageSummary`, `formatBytes`, `shortDate` (Task 44); `JournalEntry` (`@/features/journal/types`); `formatWhen` (`@/features/simulations/format`); `Card`, `ProgressBar` (`@/design/ui`); rota `/caderno/dia/:date` (Task 43).
+- Produces:
+  - `DashboardHeader({ facts: HeaderFacts })` (RF-90): seis blocos em `<dl>` — fase atual, semana atual, trilha concluída (%), streak (dias seguidos), dias estudados nos últimos 7 e 30 dias.
+  - `JournalCompliance({ overview: JournalOverview; lateEntries: JournalEntry[] })` (RF-97a, só mentor): taxa de dias com caderno completo desde o início (`ProgressBar`), entradas com atraso (cada uma um link para `/caderno/dia/<data>` com o horário real em que foi escrita), dias em falta (links, os 10 mais recentes) e o link "Abrir o caderno". Sem dias fechados: "Ainda não há dias fechados para contar."
+  - `StorageCard({ summary: StorageSummary })` (RNF-11, só mentor): "x de 1,0 GB (n%)", barra, livros e gravações separados, e aviso a partir de 80% (`role="status"`) e de 95% (`role="alert"`).
+
+- [ ] **Step 1: Testes**
+
+
+`src/features/dashboard/DashboardHeader.test.tsx`:
+```tsx
+import { render, screen } from '@testing-library/react'
+import { DashboardHeader } from './DashboardHeader'
+
+const facts = { phaseLabel: 'Fase 2 · Vendas', weekLabel: 'Semana 5', percent: 37, streak: 4, days7: 5, days30: 18 }
+
+test('mostra fase, semana, % da trilha, streak e dias estudados (RF-90)', () => {
+  render(<DashboardHeader facts={facts} />)
+  const group = screen.getByRole('region', { name: 'Resumo' })
+  expect(group).toBeInTheDocument()
+  expect(screen.getByText('Fase atual').nextElementSibling).toHaveTextContent('Fase 2 · Vendas')
+  expect(screen.getByText('Semana atual').nextElementSibling).toHaveTextContent('Semana 5')
+  expect(screen.getByText('Trilha concluída').nextElementSibling).toHaveTextContent('37%')
+  expect(screen.getByText('Streak').nextElementSibling).toHaveTextContent('4 dias')
+  expect(screen.getByText('Últimos 7 dias').nextElementSibling).toHaveTextContent('5 de 7 dias estudados')
+  expect(screen.getByText('Últimos 30 dias').nextElementSibling).toHaveTextContent('18 de 30 dias estudados')
+})
+
+test('streak no singular e zerado', () => {
+  const { rerender } = render(<DashboardHeader facts={{ ...facts, streak: 1 }} />)
+  expect(screen.getByText('Streak').nextElementSibling).toHaveTextContent('1 dia')
+  rerender(<DashboardHeader facts={{ ...facts, streak: 0, days7: 0, days30: 0, percent: 0 }} />)
+  expect(screen.getByText('Streak').nextElementSibling).toHaveTextContent('0 dias')
+  expect(screen.getByText('Últimos 7 dias').nextElementSibling).toHaveTextContent('0 de 7 dias estudados')
+})
+```
+
+`src/features/dashboard/JournalCompliance.test.tsx`:
+```tsx
+import { render, screen, within } from '@testing-library/react'
+import { MemoryRouter } from 'react-router'
+import { entryOf } from '@/test/e6Mocks'
+import { JournalCompliance } from './JournalCompliance'
+
+const renderIt = (ui: React.ReactElement) => render(<MemoryRouter>{ui}</MemoryRouter>)
+
+test('taxa, entradas com atraso (com o horário real) e dias em falta, cada um com link para o caderno (RF-97a)', () => {
+  renderIt(<JournalCompliance
+    overview={{ since: '2026-09-25', rate: 0.4, lateCount: 1, missing: ['2026-09-27', '2026-09-28', '2026-09-29'] }}
+    lateEntries={[entryOf({ date: '2026-09-26', late: true, createdAt: '2026-09-27T12:30:00Z', updatedAt: '2026-09-27T12:45:00Z' })]}
+  />)
+  expect(screen.getByRole('heading', { level: 2, name: 'Caderno em dia' })).toBeInTheDocument()
+  expect(screen.getByText('40% dos dias fechados desde 25/09 têm caderno completo.')).toBeVisible()
+  expect(screen.getByRole('progressbar', { name: 'Caderno em dia' })).toHaveAttribute('aria-valuenow', '40')
+
+  const late = screen.getByRole('link', { name: /26\/09/ })
+  expect(late).toHaveAttribute('href', '/caderno/dia/2026-09-26')
+  expect(late.closest('li')).toHaveTextContent(/escrita em 27\/09.*09:30.*última edição 27\/09.*09:45/) // horários de SP (12:30Z e 12:45Z)
+
+  const missing = screen.getByRole('list', { name: 'Dias em falta' })
+  expect(within(missing).getAllByRole('link').map((a) => a.textContent)).toEqual(['29/09', '28/09', '27/09']) // mais recente primeiro
+  expect(within(missing).getByRole('link', { name: '29/09' })).toHaveAttribute('href', '/caderno/dia/2026-09-29')
+  expect(screen.getByRole('link', { name: 'Abrir o caderno' })).toHaveAttribute('href', '/caderno')
+})
+
+test('só os 10 dias em falta mais recentes aparecem, com o resto resumido', () => {
+  const missing = Array.from({ length: 13 }, (_, i) => `2026-09-${String(i + 1).padStart(2, '0')}`)
+  renderIt(<JournalCompliance overview={{ since: '2026-09-01', rate: 0.2, lateCount: 0, missing }} lateEntries={[]} />)
+  expect(within(screen.getByRole('list', { name: 'Dias em falta' })).getAllByRole('link')).toHaveLength(10)
+  expect(screen.getByText('e mais 3 dias')).toBeVisible()
+})
+
+test('nada em falta e nada com atraso', () => {
+  renderIt(<JournalCompliance overview={{ since: '2026-09-25', rate: 1, lateCount: 0, missing: [] }} lateEntries={[]} />)
+  expect(screen.getByText('Nenhum dia em falta.')).toBeVisible()
+  expect(screen.getByText('Nenhuma entrada preenchida com atraso.')).toBeVisible()
+})
+
+test('sem dias fechados: sem barra e sem porcentagem (Review Focus 4)', () => {
+  renderIt(<JournalCompliance overview={{ since: null, rate: null, lateCount: 0, missing: [] }} lateEntries={[]} />)
+  expect(screen.getByText('Ainda não há dias fechados para contar.')).toBeVisible()
+  expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+  expect(screen.queryByText(/NaN/)).not.toBeInTheDocument()
+})
+```
+
+`src/features/dashboard/StorageCard.test.tsx`:
+```tsx
+import { render, screen } from '@testing-library/react'
+import { storageSummary } from '@/domain/dashboard'
+import { StorageCard } from './StorageCard'
+
+test('uso total, barra e separação entre livros e gravações (RNF-11)', () => {
+  render(<StorageCard summary={storageSummary([
+    { bucket: 'books', bytes: 52_428_800, files: 1 }, { bucket: 'recordings', bytes: 3_145_728, files: 2 },
+  ])} />)
+  expect(screen.getByRole('heading', { level: 2, name: 'Uso do armazenamento' })).toBeInTheDocument()
+  expect(screen.getByText('53,0 MB de 1,0 GB (5%)')).toBeVisible()
+  expect(screen.getByRole('progressbar', { name: 'Uso do armazenamento' })).toHaveAttribute('aria-valuenow', '5')
+  expect(screen.getByText('Livros: 50,0 MB (1 arquivo)')).toBeVisible()
+  expect(screen.getByText('Gravações: 3,0 MB (2 arquivos)')).toBeVisible()
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  expect(screen.queryByRole('status')).not.toBeInTheDocument()
+})
+
+test('vazio: zero arquivos, sem aviso', () => {
+  render(<StorageCard summary={storageSummary([])} />)
+  expect(screen.getByText('0 B de 1,0 GB (0%)')).toBeVisible()
+  expect(screen.getByText('Livros: 0 B (0 arquivos)')).toBeVisible()
+})
+
+test('a partir de 80% avisa; a partir de 95% é alerta', () => {
+  const { rerender } = render(<StorageCard summary={storageSummary([{ bucket: 'books', bytes: Math.round(0.85 * 1024 ** 3), files: 9 }])} />)
+  expect(screen.getByRole('status')).toHaveTextContent('Mais de 80% do plano gratuito em uso')
+  rerender(<StorageCard summary={storageSummary([{ bucket: 'recordings', bytes: Math.round(0.97 * 1024 ** 3), files: 90 }])} />)
+  expect(screen.getByRole('alert')).toHaveTextContent('Quase no limite do plano gratuito')
+})
+```
+
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/features/dashboard/DashboardHeader.test.tsx src/features/dashboard/JournalCompliance.test.tsx src/features/dashboard/StorageCard.test.tsx 2>&1 | tail -10`
+Expected: FAIL — `Failed to resolve import "./DashboardHeader"` (e os outros).
+
+- [ ] **Step 3: Implementar**
+
+
+`src/features/dashboard/DashboardHeader.tsx`:
+```tsx
+import { Card } from '@/design/ui'
+import type { HeaderFacts } from '@/domain/dashboard'
+
+const days = (n: number) => `${n} ${n === 1 ? 'dia' : 'dias'}`
+
+/** RF-90: onde ela está e o quanto tem estudado (dia estudado = caderno completo, RF-99). */
+export function DashboardHeader({ facts }: { facts: HeaderFacts }) {
+  const stats: [string, string][] = [
+    ['Fase atual', facts.phaseLabel],
+    ['Semana atual', facts.weekLabel],
+    ['Trilha concluída', `${facts.percent}%`],
+    ['Streak', days(facts.streak)],
+    ['Últimos 7 dias', `${facts.days7} de 7 dias estudados`],
+    ['Últimos 30 dias', `${facts.days30} de 30 dias estudados`],
+  ]
+  return (
+    <section aria-label="Resumo">
+      <dl className="grid grid-cols-2 gap-3">
+        {stats.map(([label, value]) => (
+          <Card key={label} className="flex flex-col gap-1 p-3">
+            <dt className="text-xs text-muted">{label}</dt>
+            <dd className="text-lg font-bold tabular-nums">{value}</dd>
+          </Card>
+        ))}
+      </dl>
+    </section>
+  )
+}
+```
+
+`src/features/dashboard/JournalCompliance.tsx`:
+```tsx
+import { useId } from 'react'
+import { Link } from 'react-router'
+import { Card, ProgressBar } from '@/design/ui'
+import { shortDate, type JournalOverview } from '@/domain/dashboard'
+import type { JournalEntry } from '@/features/journal/types'
+import { formatWhen } from '@/features/simulations/format'
+
+const MAX_MISSING = 10
+const linkCls = 'font-bold text-brand underline underline-offset-4'
+
+/** RF-97a (só mentor): taxa de dias com caderno completo, entradas com atraso e dias em falta, cada um com link para ler no caderno. */
+export function JournalCompliance({ overview, lateEntries }: { overview: JournalOverview; lateEntries: JournalEntry[] }) {
+  const id = useId()
+  const missingNewestFirst = [...overview.missing].reverse()
+  const shown = missingNewestFirst.slice(0, MAX_MISSING)
+  const extra = missingNewestFirst.length - shown.length
+  return (
+    <section aria-labelledby={id}>
+      <Card className="flex flex-col gap-4">
+        <h2 id={id} className="text-lg font-bold">Caderno em dia</h2>
+
+        {overview.rate === null || overview.since === null ? (
+          <p className="text-sm text-muted">Ainda não há dias fechados para contar.</p>
+        ) : (
+          <div className="flex flex-col gap-2">
+            <p className="text-sm text-muted">{Math.round(overview.rate * 100)}% dos dias fechados desde {shortDate(overview.since)} têm caderno completo.</p>
+            <ProgressBar value={overview.rate} label="Caderno em dia" tone="success" />
+          </div>
+        )}
+
+        <div className="flex flex-col gap-1">
+          <h3 className="font-bold">Preenchidos com atraso</h3>
+          {lateEntries.length === 0 ? (
+            <p className="text-sm text-muted">Nenhuma entrada preenchida com atraso.</p>
+          ) : (
+            <ul className="flex flex-col gap-1 text-sm">
+              {lateEntries.map((e) => (
+                <li key={e.date}>
+                  <Link to={`/caderno/dia/${e.date}`} className={linkCls}>{shortDate(e.date)}</Link>
+                  <span className="text-muted"> · escrita em {formatWhen(e.createdAt)} · última edição {formatWhen(e.updatedAt)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <h3 className="font-bold">Dias em falta</h3>
+          {shown.length === 0 ? (
+            <p className="text-sm text-muted">Nenhum dia em falta.</p>
+          ) : (
+            <>
+              <ul aria-label="Dias em falta" className="flex flex-wrap gap-x-3 gap-y-1 text-sm tabular-nums">
+                {shown.map((d) => <li key={d}><Link to={`/caderno/dia/${d}`} className={linkCls}>{shortDate(d)}</Link></li>)}
+              </ul>
+              {extra > 0 && <p className="text-sm text-muted">e mais {extra} {extra === 1 ? 'dia' : 'dias'}</p>}
+            </>
+          )}
+        </div>
+
+        <Link to="/caderno" className={`${linkCls} w-fit text-sm`}>Abrir o caderno</Link>
+      </Card>
+    </section>
+  )
+}
+```
+
+`src/features/dashboard/StorageCard.tsx`:
+```tsx
+import { useId } from 'react'
+import { Card, ProgressBar } from '@/design/ui'
+import { formatBytes, type StorageSummary } from '@/domain/dashboard'
+
+const files = (n: number) => `${n} ${n === 1 ? 'arquivo' : 'arquivos'}`
+
+/** RNF-11 (só mentor): quanto do 1 GB do plano gratuito está em uso, separado entre livros e gravações. */
+export function StorageCard({ summary }: { summary: StorageSummary }) {
+  const id = useId()
+  const percent = Math.round(summary.ratio * 100)
+  return (
+    <section aria-labelledby={id}>
+      <Card className="flex flex-col gap-3">
+        <h2 id={id} className="text-lg font-bold">Uso do armazenamento</h2>
+        <p className="text-sm text-muted tabular-nums">{formatBytes(summary.usedBytes)} de {formatBytes(summary.limitBytes)} ({percent}%)</p>
+        <ProgressBar value={summary.ratio} label="Uso do armazenamento" tone={summary.level === 'ok' ? 'success' : 'f3'} />
+        <ul className="flex flex-col gap-1 text-sm tabular-nums">
+          <li>Livros: {formatBytes(summary.books.bytes)} ({files(summary.books.files)})</li>
+          <li>Gravações: {formatBytes(summary.recordings.bytes)} ({files(summary.recordings.files)})</li>
+        </ul>
+        {summary.level === 'warn' && (
+          <p role="status" className="text-sm font-bold text-streak">Mais de 80% do plano gratuito em uso. Remova gravações já avaliadas ou livros que não usa mais.</p>
+        )}
+        {summary.level === 'danger' && (
+          <p role="alert" className="text-sm font-bold text-danger">Quase no limite do plano gratuito. Libere espaço antes de enviar novos arquivos.</p>
+        )}
+      </Card>
+    </section>
+  )
+}
+```
+
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npx vitest run src/features/dashboard/DashboardHeader.test.tsx src/features/dashboard/JournalCompliance.test.tsx src/features/dashboard/StorageCard.test.tsx 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS; `tsc` sem erros.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/features/dashboard/DashboardHeader.tsx src/features/dashboard/DashboardHeader.test.tsx src/features/dashboard/JournalCompliance.tsx src/features/dashboard/JournalCompliance.test.tsx src/features/dashboard/StorageCard.tsx src/features/dashboard/StorageCard.test.tsx
+git commit -m "feat(e7): dashboard header, journal compliance and storage usage cards"
+```
+
+---
+
+### Task 51: Treinos, leitura e últimos simulados — **[W4]**
+
+**Files:**
+- Create: `src/features/dashboard/TrainingsPanel.tsx`, `src/features/dashboard/ReadingProgress.tsx`, `src/features/dashboard/RecentSimulations.tsx`
+- Test: `src/features/dashboard/TrainingsPanel.test.tsx`, `src/features/dashboard/ReadingProgress.test.tsx`, `src/features/dashboard/RecentSimulations.test.tsx`
+
+**Interfaces:**
+- Consumes: `shortDate`, `formatScore` (Task 44); `Book` (`@/features/library/types`); `SimulationSummary` (`@/features/simulations/types`); `DIFFICULTY_LABEL`, `formatWhen` (`@/features/simulations/format`); `statusLabel` (`@/domain/simulationState`); `Card`, `ProgressBar`, `Badge` (`@/design/ui`); rotas `/simulados`, `/simulados/:id`, `/biblioteca/:bookId`.
+- Produces (todos só do mentor):
+  - `TrainingsPanel({ weeks, pending })` (RF-97b): `weeks` = `trainingsPerWeek(...)`, `pending` = `pendingTrainings(...)`. Texto "N treinos aguardando a sua avaliação" com link para `/simulados`, e a contagem por semana.
+  - `ReadingProgress({ books })` (RF-97): só materiais do tipo `livro`, com a página atual (`página 12 de 200`), "ainda não começou" ou "PDF ainda não disponível"; link para o livro.
+  - `RecentSimulations({ sims, limit = 5 })` (RF-96): os últimos simulados (data, tipo, dificuldade e nota oficial ou situação) com link para cada um e para a lista completa. A lista completa, com cenário, notas e feedback, é a tela de Simulados da E5.
+
+- [ ] **Step 1: Testes**
+
+
+`src/features/dashboard/TrainingsPanel.test.tsx`:
+```tsx
+import { render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router'
+import { TrainingsPanel } from './TrainingsPanel'
+
+const weeks = [{ weekStart: '2026-09-21', count: 2 }, { weekStart: '2026-09-28', count: 1 }, { weekStart: '2026-10-05', count: 0 }]
+const renderIt = (pending: number) => render(<MemoryRouter><TrainingsPanel weeks={weeks} pending={pending} /></MemoryRouter>)
+
+test('treinos por semana e os que aguardam a avaliação do mentor (RF-97b)', () => {
+  renderIt(3)
+  expect(screen.getByRole('heading', { level: 2, name: 'Treinos' })).toBeInTheDocument()
+  expect(screen.getByText('3 treinos aguardando a sua avaliação.')).toBeVisible()
+  expect(screen.getByRole('link', { name: 'Avaliar treinos' })).toHaveAttribute('href', '/simulados')
+  expect(screen.getByText('Semana de 21/09: 2 treinos')).toBeVisible()
+  expect(screen.getByText('Semana de 28/09: 1 treino')).toBeVisible()
+  expect(screen.getByText('Semana de 05/10: 0 treinos')).toBeVisible()
+})
+
+test('um treino aguardando e nenhum aguardando', () => {
+  const { unmount } = renderIt(1)
+  expect(screen.getByText('1 treino aguardando a sua avaliação.')).toBeVisible()
+  unmount()
+  renderIt(0)
+  expect(screen.getByText('Nenhum treino aguardando a sua avaliação.')).toBeVisible()
+  expect(screen.queryByRole('link', { name: 'Avaliar treinos' })).not.toBeInTheDocument()
+})
+```
+
+`src/features/dashboard/ReadingProgress.test.tsx`:
+```tsx
+import { render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router'
+import { bookOf, courseOf } from '@/test/e6Mocks'
+import { ReadingProgress } from './ReadingProgress'
+
+test('página atual de cada livro; cursos ficam de fora (RF-97)', () => {
+  render(<MemoryRouter><ReadingProgress books={[
+    bookOf({ filePath: 'carnegie/1.pdf', progress: { page: 12, totalPages: 200, updatedAt: 'x' } }),
+    bookOf({ id: 'gitomer', title: 'O Livro de Ouro', filePath: 'gitomer/1.pdf', progress: null }),
+    bookOf({ id: 'outro', title: 'Sem PDF', filePath: null }),
+    courseOf(),
+  ]} /></MemoryRouter>)
+  expect(screen.getByRole('heading', { level: 2, name: 'Leitura' })).toBeInTheDocument()
+  expect(screen.getAllByRole('listitem')).toHaveLength(3)
+  expect(screen.getByRole('link', { name: /Como Fazer Amigos/ })).toHaveAttribute('href', '/biblioteca/carnegie')
+  expect(screen.getByText('página 12 de 200')).toBeVisible()
+  expect(screen.getByText('ainda não começou')).toBeVisible()
+  expect(screen.getByText('PDF ainda não disponível')).toBeVisible()
+  expect(screen.queryByText(/Sebrae/)).not.toBeInTheDocument()
+  expect(screen.getByRole('progressbar', { name: 'Leitura de Como Fazer Amigos e Influenciar Pessoas' })).toHaveAttribute('aria-valuenow', '6')
+})
+
+test('página sem total conhecido não vira barra nem NaN', () => {
+  render(<MemoryRouter><ReadingProgress books={[bookOf({ filePath: 'c/1.pdf', progress: { page: 7, totalPages: null, updatedAt: 'x' } })]} /></MemoryRouter>)
+  expect(screen.getByText('página 7')).toBeVisible()
+  expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+})
+
+test('sem livros', () => {
+  render(<MemoryRouter><ReadingProgress books={[]} /></MemoryRouter>)
+  expect(screen.getByText('Nenhum livro na biblioteca.')).toBeVisible()
+})
+```
+
+`src/features/dashboard/RecentSimulations.test.tsx`:
+```tsx
+import { render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router'
+import { summaryOf } from '@/test/simulationMocks'
+import { RecentSimulations } from './RecentSimulations'
+
+const renderIt = (ui: React.ReactElement) => render(<MemoryRouter>{ui}</MemoryRouter>)
+
+test('mostra os 5 mais recentes, o mais novo primeiro, com nota oficial ou situação (RF-96)', () => {
+  const sims = Array.from({ length: 7 }, (_, i) => summaryOf({
+    id: `s${i}`, createdAt: `2026-09-${String(20 + i).padStart(2, '0')}T15:00:00Z`,
+    mode: i === 6 ? 'treino' : 'surpresa', status: i === 6 ? 'aguardando_notas' : 'concluido',
+    difficulty: 'dificil', official: i === 6 ? null : 18.5, myScoreDone: true,
+  }))
+  renderIt(<RecentSimulations sims={sims} />)
+  const links = screen.getAllByRole('link', { name: /Difícil/ })
+  expect(links).toHaveLength(5)
+  expect(links[0]).toHaveAttribute('href', '/simulados/s6')
+  expect(links[0]).toHaveTextContent('26/09')
+  expect(links[0]).toHaveTextContent('Treino')
+  expect(links[1]).toHaveTextContent('nota 18,5')
+  expect(links[1]).toHaveTextContent('Surpresa')
+  expect(screen.getByRole('link', { name: 'Ver todos os simulados' })).toHaveAttribute('href', '/simulados')
+})
+
+test('sem simulados', () => {
+  renderIt(<RecentSimulations sims={[]} />)
+  expect(screen.getByRole('heading', { level: 2, name: 'Últimos simulados' })).toBeInTheDocument()
+  expect(screen.getByText('Nenhum simulado ainda.')).toBeVisible()
+})
+```
+
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/features/dashboard/TrainingsPanel.test.tsx src/features/dashboard/ReadingProgress.test.tsx src/features/dashboard/RecentSimulations.test.tsx 2>&1 | tail -10`
+Expected: FAIL — `Failed to resolve import "./TrainingsPanel"` (e os outros).
+
+- [ ] **Step 3: Implementar**
+
+
+`src/features/dashboard/TrainingsPanel.tsx`:
+```tsx
+import { useId } from 'react'
+import { Link } from 'react-router'
+import { Card } from '@/design/ui'
+import { shortDate } from '@/domain/dashboard'
+
+const trainings = (n: number) => `${n} ${n === 1 ? 'treino' : 'treinos'}`
+
+/** RF-97b (só mentor): treinos feitos por semana e quantos aguardam a ficha do mentor. */
+export function TrainingsPanel({ weeks, pending }: { weeks: { weekStart: string; count: number }[]; pending: number }) {
+  const id = useId()
+  return (
+    <section aria-labelledby={id}>
+      <Card className="flex flex-col gap-3">
+        <h2 id={id} className="text-lg font-bold">Treinos</h2>
+        {pending === 0 ? (
+          <p className="text-sm text-muted">Nenhum treino aguardando a sua avaliação.</p>
+        ) : (
+          <div className="flex flex-col gap-1">
+            <p className="text-sm font-bold text-streak">{pending} {pending === 1 ? 'treino aguardando' : 'treinos aguardando'} a sua avaliação.</p>
+            <Link to="/simulados" className="w-fit text-sm font-bold text-brand underline underline-offset-4">Avaliar treinos</Link>
+          </div>
+        )}
+        <ul className="flex flex-col gap-1 text-sm tabular-nums">
+          {weeks.map((w) => <li key={w.weekStart}>Semana de {shortDate(w.weekStart)}: {trainings(w.count)}</li>)}
+        </ul>
+      </Card>
+    </section>
+  )
+}
+```
+
+`src/features/dashboard/ReadingProgress.tsx`:
+```tsx
+import { useId } from 'react'
+import { Link } from 'react-router'
+import { Card, ProgressBar } from '@/design/ui'
+import type { Book } from '@/features/library/types'
+
+/** RF-97 (só mentor): página atual de cada livro. Cursos (link externo) não têm página. */
+export function ReadingProgress({ books }: { books: Book[] }) {
+  const id = useId()
+  const list = books.filter((b) => b.kind === 'livro')
+  return (
+    <section aria-labelledby={id}>
+      <Card className="flex flex-col gap-3">
+        <h2 id={id} className="text-lg font-bold">Leitura</h2>
+        {list.length === 0 ? (
+          <p className="text-sm text-muted">Nenhum livro na biblioteca.</p>
+        ) : (
+          <ul className="flex flex-col gap-3">
+            {list.map((b) => {
+              const p = b.progress
+              const total = p?.totalPages ?? null
+              return (
+                <li key={b.id} className="flex flex-col gap-1">
+                  <Link to={`/biblioteca/${b.id}`} className="w-fit font-bold text-brand underline underline-offset-4">{b.title}</Link>
+                  <span className="text-sm text-muted tabular-nums">
+                    {b.filePath === null ? 'PDF ainda não disponível' : p === null ? 'ainda não começou' : total === null ? `página ${p.page}` : `página ${p.page} de ${total}`}
+                  </span>
+                  {p !== null && total !== null && total > 0 && (
+                    <ProgressBar value={p.page / total} label={`Leitura de ${b.title}`} />
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </Card>
+    </section>
+  )
+}
+```
+
+`src/features/dashboard/RecentSimulations.tsx`:
+```tsx
+import { useId } from 'react'
+import { Link } from 'react-router'
+import { Card } from '@/design/ui'
+import { formatScore } from '@/domain/dashboard'
+import { statusLabel } from '@/domain/simulationState'
+import { DIFFICULTY_LABEL, formatWhen } from '@/features/simulations/format'
+import type { SimulationSummary } from '@/features/simulations/types'
+
+/** RF-96 (só mentor): os últimos simulados; o histórico completo, com cenário, notas e feedback, é a tela de Simulados. */
+export function RecentSimulations({ sims, limit = 5 }: { sims: SimulationSummary[]; limit?: number }) {
+  const id = useId()
+  const latest = [...sims].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit)
+  return (
+    <section aria-labelledby={id}>
+      <Card className="flex flex-col gap-3">
+        <h2 id={id} className="text-lg font-bold">Últimos simulados</h2>
+        {latest.length === 0 ? (
+          <p className="text-sm text-muted">Nenhum simulado ainda.</p>
+        ) : (
+          <ul className="flex flex-col gap-2 text-sm">
+            {latest.map((s) => (
+              <li key={s.id}>
+                <Link to={`/simulados/${s.id}`} className="font-bold text-brand underline underline-offset-4">
+                  {formatWhen(s.createdAt)} · {s.mode === 'treino' ? 'Treino' : 'Surpresa'} · {DIFFICULTY_LABEL[s.difficulty]} ·{' '}
+                  {s.official !== null ? `nota ${formatScore(s.official)}` : statusLabel(s.mode, s.status, 'mentor')}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        )}
+        <Link to="/simulados" className="w-fit text-sm font-bold text-brand underline underline-offset-4">Ver todos os simulados</Link>
+      </Card>
+    </section>
+  )
+}
+```
+
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npx vitest run src/features/dashboard/TrainingsPanel.test.tsx src/features/dashboard/ReadingProgress.test.tsx src/features/dashboard/RecentSimulations.test.tsx 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS; `tsc` sem erros.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/features/dashboard/TrainingsPanel.tsx src/features/dashboard/TrainingsPanel.test.tsx src/features/dashboard/ReadingProgress.tsx src/features/dashboard/ReadingProgress.test.tsx src/features/dashboard/RecentSimulations.tsx src/features/dashboard/RecentSimulations.test.tsx
+git commit -m "feat(e7): trainings, reading progress and recent simulations panels"
+```
+
+---
+
+### Task 52: `DashboardScreen` — composição por papel — **[W4]**
+
+**Files:**
+- Create: `src/features/dashboard/DashboardScreen.tsx`, `src/features/dashboard/MentorSections.tsx`
+- Test: `src/features/dashboard/DashboardScreen.test.tsx`
+
+**Interfaces:**
+- Consumes: hooks `useScoreSeries`, `useActivityDays`, `useStorageUsage` (`./hooks`, Task 44/46); `useNodeStates`, `useProgress`, `useJournalDays` (`@/features/progress/hooks`); `useJournalEntries` (`@/features/journal/hooks`); `useBooks` (`@/features/library/hooks`); `useSimulations` (`@/features/simulations/hooks`); `useAuth`; funções puras da Task 44 (`weeklyOfficial`, `selfVsMentor`, `radarByCriterion`, `phaseProgress`, `headerFacts`, `heatmapWeeks`, `activityStart`, `journalOverview`, `trainingsPerWeek`, `pendingTrainings`, `storageSummary`); componentes das Tasks 47–51.
+- Produces:
+  - `DashboardScreen()` (rota `/painel`, Task 53): `<h1>` "Painel da aluna" (mentor) ou "Seu painel" (aluna); mesmas seções nas duas contas — resumo (RF-90), evolução das notas, autoavaliação × mentor, radar, atividade, checklists por fase (RF-91 a RF-95, RF-98) — e, **só para o mentor**, `MentorSections`. Enquanto os dados comuns carregam: "Carregando o painel…"; se algum falhar: alerta "Não foi possível carregar o painel. Verifique a conexão e recarregue a página.".
+  - `MentorSections()`: caderno em dia, treinos, leitura, últimos simulados e uso do Storage. Cada bloco carrega e falha sozinho ("Carregando …" / "Não foi possível carregar …"), então um erro no Storage não esconde o resto. Os hooks do mentor ficam **só** aqui: a tela da aluna nunca os chama (Review Focus 2).
+- Os gráficos e o `today` vêm de `new Date()` lido uma vez por montagem; os componentes filhos só recebem props.
+
+- [ ] **Step 1: Teste**
+
+
+`src/features/dashboard/DashboardScreen.test.tsx`:
+```tsx
+import { render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router'
+import { useAuth } from '@/features/auth/AuthProvider'
+import { useJournalEntries } from '@/features/journal/hooks'
+import { useBooks } from '@/features/library/hooks'
+import { useJournalDays, useNodeStates, useProgress } from '@/features/progress/hooks'
+import { useSimulations } from '@/features/simulations/hooks'
+import { activityOf, queryOf, scoreRowOf, usageOf } from '@/test/dashboardMocks'
+import { bookOf, entryOf } from '@/test/e6Mocks'
+import { nodeStatesOf, progressOf } from '@/test/progressMocks'
+import { summaryOf } from '@/test/simulationMocks'
+import { DashboardScreen } from './DashboardScreen'
+import { useActivityDays, useScoreSeries, useStorageUsage } from './hooks'
+
+vi.mock('@/lib/supabase', () => ({ supabase: {} }))
+vi.mock('@/features/auth/AuthProvider', () => ({ useAuth: vi.fn() }))
+vi.mock('@/features/progress/hooks')
+vi.mock('@/features/journal/hooks')
+vi.mock('@/features/library/hooks')
+vi.mock('@/features/simulations/hooks')
+vi.mock('./hooks')
+
+const COMMON = ['Evolução das notas', 'Autoavaliação × mentor', 'Radar por critério', 'Atividade', 'Checklists por fase']
+const MENTOR_ONLY = ['Caderno em dia', 'Treinos', 'Leitura', 'Últimos simulados', 'Uso do armazenamento']
+
+beforeAll(() => { vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} }) })
+afterAll(() => { vi.unstubAllGlobals() })
+beforeEach(() => {
+  vi.clearAllMocks()
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2026-09-30T15:00:00Z'))
+})
+afterEach(() => { vi.useRealTimers() })
+
+function setup(role: 'mentor' | 'aluna') {
+  vi.mocked(useAuth).mockReturnValue({ session: null, profile: { id: 'u', role, name: 'Fulana' }, loading: false, signOut: vi.fn() })
+  vi.mocked(useScoreSeries).mockReturnValue(queryOf([
+    scoreRowOf({ simulationId: 'a', day: '2026-09-29', weekStart: '2026-09-28', studentTotal: 24, mentorTotal: 20, official: 22 }),
+    scoreRowOf({ simulationId: 'b', day: '2026-09-20', weekStart: '2026-09-14', studentTotal: 16, mentorTotal: 14, official: 15 }),
+  ]))
+  vi.mocked(useActivityDays).mockReturnValue(queryOf([activityOf({ day: '2026-09-29' }), activityOf({ day: '2026-09-30', journal: false })]))
+  vi.mocked(useNodeStates).mockReturnValue(nodeStatesOf(['w01.video.1']))
+  vi.mocked(useProgress).mockReturnValue(progressOf(['w01.video.1']))
+  vi.mocked(useJournalDays).mockReturnValue(queryOf<ReadonlySet<string>>(new Set(['2026-09-29'])))
+  vi.mocked(useJournalEntries).mockReturnValue(queryOf([entryOf({ date: '2026-09-29' })]))
+  vi.mocked(useSimulations).mockReturnValue(queryOf([summaryOf({ mode: 'treino', status: 'aguardando_notas', myScoreDone: false })]))
+  vi.mocked(useBooks).mockReturnValue(queryOf([bookOf()]))
+  vi.mocked(useStorageUsage).mockReturnValue(queryOf([usageOf()]))
+  return render(<MemoryRouter><DashboardScreen /></MemoryRouter>)
+}
+
+const h2 = (name: string) => screen.queryByRole('heading', { level: 2, name })
+
+test('mentor vê tudo: resumo, gráficos e as seções só dele (RF-90 a RF-97b)', () => {
+  setup('mentor')
+  expect(screen.getByRole('heading', { level: 1, name: 'Painel da aluna' })).toBeInTheDocument()
+  expect(screen.getByRole('region', { name: 'Resumo' })).toBeInTheDocument()
+  for (const name of [...COMMON, ...MENTOR_ONLY]) expect(h2(name), name).toBeInTheDocument()
+  expect(screen.getByText('Ela se avalia, em média, 3,0 pontos acima da nota do mentor.')).toBeVisible()
+  expect(screen.getByText('1 treino aguardando a sua avaliação.')).toBeVisible()
+  expect(screen.getByText(/de 1,0 GB/)).toBeVisible()
+})
+
+test('aluna vê a versão dela e nada do mentor, nem sequer chama os hooks dele (Review Focus 2)', () => {
+  setup('aluna')
+  expect(screen.getByRole('heading', { level: 1, name: 'Seu painel' })).toBeInTheDocument()
+  expect(screen.getByRole('region', { name: 'Resumo' })).toBeInTheDocument()
+  for (const name of COMMON) expect(h2(name), name).toBeInTheDocument()
+  for (const name of MENTOR_ONLY) expect(h2(name), name).not.toBeInTheDocument()
+  expect(screen.getByText('Você se avalia, em média, 3,0 pontos acima da nota do mentor.')).toBeVisible()
+  expect(useStorageUsage).not.toHaveBeenCalled()
+  expect(useSimulations).not.toHaveBeenCalled()
+  expect(useBooks).not.toHaveBeenCalled()
+  expect(useJournalEntries).not.toHaveBeenCalled()
+})
+
+test('carregando e erro dos dados comuns', () => {
+  setup('aluna').unmount()
+  vi.mocked(useScoreSeries).mockReturnValue({ ...queryOf(undefined), isLoading: true } as never)
+  const { unmount } = render(<MemoryRouter><DashboardScreen /></MemoryRouter>)
+  expect(screen.getByRole('status')).toHaveTextContent('Carregando o painel…')
+  unmount()
+  vi.mocked(useScoreSeries).mockReturnValue(queryOf(undefined) as never)
+  render(<MemoryRouter><DashboardScreen /></MemoryRouter>)
+  expect(screen.getByRole('alert')).toHaveTextContent('Não foi possível carregar o painel.')
+})
+
+test('um bloco do mentor que falha não esconde os outros', () => {
+  setup('mentor').unmount()
+  vi.mocked(useStorageUsage).mockReturnValue(queryOf(undefined) as never)
+  render(<MemoryRouter><DashboardScreen /></MemoryRouter>)
+  expect(screen.getByRole('alert')).toHaveTextContent('Não foi possível carregar o uso do armazenamento.')
+  expect(h2('Caderno em dia')).toBeInTheDocument()
+  expect(h2('Últimos simulados')).toBeInTheDocument()
+})
+
+test('painel vazio não mostra NaN nem gráfico quebrado (Review Focus 4)', () => {
+  setup('mentor').unmount()
+  vi.mocked(useScoreSeries).mockReturnValue(queryOf([]))
+  vi.mocked(useActivityDays).mockReturnValue(queryOf([]))
+  vi.mocked(useJournalDays).mockReturnValue(queryOf<ReadonlySet<string>>(new Set()))
+  vi.mocked(useJournalEntries).mockReturnValue(queryOf([]))
+  vi.mocked(useSimulations).mockReturnValue(queryOf([]))
+  vi.mocked(useBooks).mockReturnValue(queryOf([]))
+  vi.mocked(useStorageUsage).mockReturnValue(queryOf([]))
+  const { container } = render(<MemoryRouter><DashboardScreen /></MemoryRouter>)
+  expect(screen.getAllByText('Ainda não há simulados com as duas fichas.')).toHaveLength(2)
+  expect(screen.getByText('Sem simulados com as duas fichas nas últimas 4 semanas.')).toBeVisible()
+  expect(screen.getByText('Nenhuma atividade no período.')).toBeVisible()
+  expect(screen.getByText('Ainda não há dias fechados para contar.')).toBeVisible()
+  expect(screen.getByText('Nenhum treino aguardando a sua avaliação.')).toBeVisible()
+  expect(screen.getByText('Nenhum simulado ainda.')).toBeVisible()
+  expect(screen.getByText('0 B de 1,0 GB (0%)')).toBeVisible()
+  expect(container).not.toHaveTextContent('NaN')
+})
+```
+
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/features/dashboard/DashboardScreen.test.tsx 2>&1 | tail -10`
+Expected: FAIL — `Failed to resolve import "./DashboardScreen"`.
+
+- [ ] **Step 3: Implementar**
+
+
+`src/features/dashboard/MentorSections.tsx`:
+```tsx
+import { useState, type ReactNode } from 'react'
+import type { UseQueryResult } from '@tanstack/react-query'
+import { activityStart, journalOverview, pendingTrainings, storageSummary, trainingsPerWeek } from '@/domain/dashboard'
+import { useJournalEntries } from '@/features/journal/hooks'
+import { useBooks } from '@/features/library/hooks'
+import { useSimulations } from '@/features/simulations/hooks'
+import { spDate } from '@/lib/dates'
+import { JournalCompliance } from './JournalCompliance'
+import { ReadingProgress } from './ReadingProgress'
+import { RecentSimulations } from './RecentSimulations'
+import { StorageCard } from './StorageCard'
+import { TrainingsPanel } from './TrainingsPanel'
+import { useActivityDays, useStorageUsage } from './hooks'
+
+/** Cada bloco carrega e falha sozinho: um erro em um deles não esconde os outros. */
+function Async<T>({ query, label, children }: { query: UseQueryResult<T>; label: string; children: (data: T) => ReactNode }) {
+  if (query.isLoading) return <p role="status" className="text-sm text-muted">Carregando {label}…</p>
+  if (query.data === undefined) return <p role="alert" className="text-sm text-danger">Não foi possível carregar {label}.</p>
+  return <>{children(query.data)}</>
+}
+
+/** Só o mentor (RF-96, RF-97, RF-97a, RF-97b, RNF-11). Os hooks daqui nunca rodam na tela da aluna. */
+export function MentorSections() {
+  const [now] = useState(() => new Date())
+  const today = spDate(now)
+  const entries = useJournalEntries()
+  const activity = useActivityDays()
+  const sims = useSimulations()
+  const books = useBooks()
+  const storage = useStorageUsage()
+  return (
+    <>
+      <Async query={entries} label="o caderno">
+        {(list) => (
+          <JournalCompliance
+            overview={journalOverview(list, activityStart(activity.data ?? [], list), now)}
+            lateEntries={list.filter((e) => e.complete && e.late)}
+          />
+        )}
+      </Async>
+      <Async query={sims} label="os treinos">
+        {(list) => <TrainingsPanel weeks={trainingsPerWeek(list, today)} pending={pendingTrainings(list)} />}
+      </Async>
+      <Async query={books} label="a leitura">{(list) => <ReadingProgress books={list} />}</Async>
+      <Async query={sims} label="os simulados">{(list) => <RecentSimulations sims={list} />}</Async>
+      <Async query={storage} label="o uso do armazenamento">{(rows) => <StorageCard summary={storageSummary(rows)} />}</Async>
+    </>
+  )
+}
+```
+
+`src/features/dashboard/DashboardScreen.tsx`:
+```tsx
+import { useState } from 'react'
+import { headerFacts, heatmapWeeks, phaseProgress, radarByCriterion, selfVsMentor, weeklyOfficial } from '@/domain/dashboard'
+import { useAuth } from '@/features/auth/AuthProvider'
+import { useJournalDays, useNodeStates, useProgress } from '@/features/progress/hooks'
+import { spDate } from '@/lib/dates'
+import { ActivityHeatmap } from './ActivityHeatmap'
+import { ChecklistBars } from './ChecklistBars'
+import { CriteriaRadar } from './CriteriaRadar'
+import { DashboardHeader } from './DashboardHeader'
+import { EvolutionChart } from './EvolutionChart'
+import { MentorSections } from './MentorSections'
+import { PerceptionChart } from './PerceptionChart'
+import { useActivityDays, useScoreSeries } from './hooks'
+
+/** RF-90 a RF-95 (e RF-98): as mesmas seções para as duas contas; cada uma vê os próprios dados pela RLS. */
+function CommonSections({ viewer }: { viewer: 'mentor' | 'aluna' }) {
+  const [now] = useState(() => new Date())
+  const today = spDate(now)
+  const scores = useScoreSeries()
+  const activity = useActivityDays()
+  const trail = useNodeStates()
+  const progress = useProgress()
+  const journal = useJournalDays()
+
+  if (scores.isLoading || activity.isLoading || trail.isLoading || progress.isLoading || journal.isLoading) {
+    return <p role="status" className="text-muted">Carregando o painel…</p>
+  }
+  if (!scores.data || !activity.data || !trail.data || !progress.data || !journal.data) {
+    return <p role="alert" className="text-danger">Não foi possível carregar o painel. Verifique a conexão e recarregue a página.</p>
+  }
+
+  const phases = phaseProgress(progress.data.doneItems, trail.data.gateDone)
+  const facts = headerFacts({
+    phase: trail.data.currentPhase, next: trail.data.next?.node ?? null, progress: phases, completeDates: journal.data, today,
+  })
+  return (
+    <>
+      <DashboardHeader facts={facts} />
+      <EvolutionChart points={weeklyOfficial(scores.data)} />
+      <PerceptionChart points={selfVsMentor(scores.data)} viewer={viewer} />
+      <CriteriaRadar points={radarByCriterion(scores.data, today)} />
+      <ActivityHeatmap weeks={heatmapWeeks(activity.data, today)} />
+      <ChecklistBars progress={phases} />
+    </>
+  )
+}
+
+export function DashboardScreen() {
+  const { profile } = useAuth()
+  if (!profile) return <p role="status" className="p-6 text-muted">Carregando…</p>
+  const mentor = profile.role === 'mentor'
+  return (
+    <main className="mx-auto flex max-w-md flex-col gap-4 px-4 pt-6 pb-8">
+      <h1 className="font-display text-3xl font-black text-brand">{mentor ? 'Painel da aluna' : 'Seu painel'}</h1>
+      <CommonSections viewer={profile.role} />
+      {mentor && <MentorSections />}
+    </main>
+  )
+}
+```
+
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npx vitest run src/features/dashboard 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS em todos os arquivos da pasta; `tsc` sem erros.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/features/dashboard/DashboardScreen.tsx src/features/dashboard/MentorSections.tsx src/features/dashboard/DashboardScreen.test.tsx
+git commit -m "feat(e7): dashboard screen with student and mentor sections"
+```
+
+---
+
+### Task 53: Rota `/painel`, aba "Painel" e E2E — **[W3]**
+
+**Files:**
+- Modify: `src/App.tsx`, `src/App.test.tsx`, `src/features/shell/AppShell.tsx`, `src/features/shell/AppShell.test.tsx`, `src/design/ui/PixelIcon.tsx`
+- Create: `e2e/dashboard.spec.ts`
+
+**Interfaces:**
+- Consumes: `DashboardScreen` (Task 52); `resetProgress`, `resetSimulations`, `resetJournal`, `signIn`, `studentEmail`, `mentorEmail` (`e2e/support.ts`, sem mudanças); migration e hooks (Tasks 45 e 46) já aplicados; E6 concluída (Task 43: `AppShell` com a aba "Caderno" e o `App.tsx` com as rotas do caderno).
+- Produces: rota `/painel` (carregada sob demanda com `lazy`, porque o Recharts é pesado), aba "Painel" na barra de baixo (5ª aba, `PixelIcon name="chart"`), glifo `chart` no `PixelIcon`, e o E2E "painel da aluna sem nada do mentor / painel do mentor completo".
+- Não mexa em nada além dos arquivos acima. As edições abaixo dizem em que linha entrar; leia o arquivo antes, porque a Task 43 pode ter mudado detalhes.
+
+- [ ] **Step 1: Testes primeiro**
+
+`src/App.test.tsx` — acrescente ao fim do arquivo:
+```tsx
+test('rota do painel exige login', async () => {
+  render(<MemoryRouter initialEntries={['/painel']}><AuthProvider><AppRoutes /></AuthProvider></MemoryRouter>)
+  expect(await screen.findByRole('heading', { name: 'Entrar' })).toBeInTheDocument()
+})
+```
+
+`src/features/shell/AppShell.test.tsx` — dentro do `<Route element={<AppShell />}>` de `renderAt`, junto das outras rotas, acrescente `<Route path="painel" element={<h1>Tela painel</h1>} />` e ao fim do arquivo:
+```tsx
+test('a barra tem as cinco abas e a aba Painel fica ativa em /painel', () => {
+  renderAt('/painel')
+  expect(screen.getAllByRole('link').map((a) => a.textContent)).toEqual(['Hoje', 'Trilha', 'Simulados', 'Caderno', 'Painel'])
+  expect(screen.getByRole('link', { name: 'Painel' })).toHaveAttribute('aria-current', 'page')
+  expect(screen.getByRole('link', { name: 'Caderno' })).not.toHaveAttribute('aria-current')
+})
+```
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/App.test.tsx src/features/shell/AppShell.test.tsx 2>&1 | tail -12`
+Expected: FAIL — o teste da barra (só quatro abas) e o do painel sem rota (redireciona para `/`, então o teste de login ainda pode passar; o de `AppShell` falha).
+
+- [ ] **Step 3: Implementar a rota e a aba**
+
+`src/design/ui/PixelIcon.tsx` — acrescente o glifo `chart` ao objeto `glyphs`, depois de `chest`:
+```ts
+  chart: ['.......', '......#', '..#...#', '..#.#.#', '#.#.#.#', '#.#.#.#', '#######'],
+```
+
+`src/features/shell/AppShell.tsx` — acrescente ao fim do array `NAV`:
+```tsx
+  { to: '/painel', label: 'Painel', icon: <PixelIcon name="chart" /> },
+```
+
+`src/App.tsx` — depois da linha do `BookScreen` lazy, acrescente:
+```tsx
+// O Recharts é pesado: o painel só carrega quando alguém abre a aba.
+const DashboardScreen = lazy(() => import('./features/dashboard/DashboardScreen').then((m) => ({ default: m.DashboardScreen })))
+```
+e, dentro do `<Route element={<RequireAuth><AppShell /></RequireAuth>}>`, depois da rota `biblioteca/:bookId`:
+```tsx
+        <Route path="painel" element={<Suspense fallback={<p role="status" className="p-6 text-muted">Carregando…</p>}><DashboardScreen /></Suspense>} />
+```
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npx vitest run src/App.test.tsx src/features/shell src/design 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS; `tsc` sem erros.
+
+- [ ] **Step 5: E2E**
+
+`e2e/dashboard.spec.ts`:
+```ts
+import { devices, expect, test, type Browser, type Page } from '@playwright/test'
+import { mentorEmail, resetJournal, resetProgress, resetSimulations, signIn, studentEmail } from './support'
+
+/** Cada pessoa em um contexto próprio (sessões separadas), no mesmo formato de celular do projeto. */
+async function pageFor(browser: Browser, email: string): Promise<Page> {
+  const context = await browser.newContext({ ...devices['Pixel 7'], baseURL: 'http://localhost:5173' })
+  const page = await context.newPage()
+  await signIn(page, email)
+  return page
+}
+
+test.beforeEach(async () => {
+  await resetProgress()
+  await resetSimulations()
+  await resetJournal()
+})
+
+test('aluna: o item marcado hoje vira um dia sem caderno no mapa de calor, e o painel não tem nada do mentor', async ({ browser }) => {
+  const student = await pageFor(browser, await studentEmail())
+  await expect(student.getByRole('heading', { level: 1, name: 'Hoje' })).toBeVisible()
+  const box = student.getByRole('checkbox').first()
+  await box.click()
+  await expect(box).toBeChecked()
+  await student.reload()
+  await expect(student.getByRole('checkbox').first()).toBeChecked() // gravou no banco
+
+  await student.getByRole('link', { name: 'Painel', exact: true }).click()
+  await expect(student.getByRole('heading', { level: 1, name: 'Seu painel' })).toBeVisible()
+  await expect(student.getByText('1 dia com atividade: 0 com caderno e 1 sem caderno.')).toBeVisible()
+  await expect(student.getByText('Ainda não há simulados com as duas fichas.').first()).toBeVisible()
+  for (const name of ['Caderno em dia', 'Treinos', 'Leitura', 'Últimos simulados', 'Uso do armazenamento']) {
+    await expect(student.getByRole('heading', { level: 2, name, exact: true })).toHaveCount(0)
+  }
+})
+
+test('mentor: vê o painel completo, com o uso do Storage', async ({ browser }) => {
+  const mentor = await pageFor(browser, await mentorEmail())
+  await mentor.getByRole('link', { name: 'Painel', exact: true }).click()
+  await expect(mentor.getByRole('heading', { level: 1, name: 'Painel da aluna' })).toBeVisible()
+  for (const name of [
+    'Evolução das notas', 'Autoavaliação × mentor', 'Radar por critério', 'Atividade', 'Checklists por fase',
+    'Caderno em dia', 'Treinos', 'Leitura', 'Últimos simulados', 'Uso do armazenamento',
+  ]) {
+    await expect(mentor.getByRole('heading', { level: 2, name, exact: true })).toBeVisible()
+  }
+  await expect(mentor.getByText(/de 1,0 GB \(\d+%\)/)).toBeVisible()
+  await expect(mentor.getByText('Nenhum treino aguardando a sua avaliação.')).toBeVisible()
+})
+```
+
+Run: `set -a; eval "$(npx supabase status -o env)"; set +a; npx playwright test e2e/dashboard.spec.ts 2>&1 | tail -15`
+Expected: 2 passed. (O E2E roda uma spec por vez e apaga progresso, simulados e caderno do banco **local**.)
+
+- [ ] **Step 6: Conferência no navegador (o jsdom não desenha o SVG)**
+
+Run: `npm run dev`, entre como mentor e como aluna, abra `/painel` em 360 px de largura e confira: as linhas e o radar aparecem com as cores do tema; as linhas de meta 15 e 22 aparecem rotuladas; o resumo em texto e a tabela batem com o gráfico; nenhum erro no console; com `prefers-reduced-motion` nada anima; a barra de baixo com 5 abas cabe sem cortar. Para ver os gráficos com dados, conclua um simulado com as duas fichas (E2E `simulations.spec.ts` deixa um) antes de abrir o painel. Anote no PR o que viu.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/App.tsx src/App.test.tsx src/features/shell/AppShell.tsx src/features/shell/AppShell.test.tsx src/design/ui/PixelIcon.tsx e2e/dashboard.spec.ts
+git commit -m "feat(e7): dashboard route, nav tab and e2e"
+```
+
+---
+
+## Cobertura dos RFs da E7
+
+| RF | Onde |
+|---|---|
+| RF-90 (cabeçalho: fase, semana, % da trilha, streak, dias estudados em 7 e 30 dias) | Tasks 44 (`headerFacts`, `studiedDays`, `phaseProgress`), 50 (`DashboardHeader`) e 52 |
+| RF-91 (linha da média oficial semanal com metas 15 e 22) | Tasks 44 (`weeklyOfficial`), 45 (`v_score_series`), 46 e 47 (`EvolutionChart`) |
+| RF-92 (autoavaliação × mentor) | Tasks 44 (`selfVsMentor`), 45, 46 e 47 (`PerceptionChart`) |
+| RF-93 (radar dos 6 critérios, últimas 4 semanas × anteriores) | Tasks 44 (`radarByCriterion`), 45 e 48 (`CriteriaRadar`) |
+| RF-94 (mapa de calor: item, caderno ou simulado) e RF-99a (dias sem caderno em cor própria) | Tasks 44 (`heatmapWeeks`), 45 (`v_activity_days`), 46 e 49 (`ActivityHeatmap`) |
+| RF-95 (% de checklists por fase) | Tasks 44 (`phaseProgress`) e 48 (`ChecklistBars`) |
+| RF-96 (histórico de simulados) | Task 51 (`RecentSimulations`: últimos 5 + link para a lista completa da E5; ver decisões abaixo) |
+| RF-97 (página atual de cada livro) | Task 51 (`ReadingProgress`, `useBooks` da E6) |
+| RF-97a (caderno em dia: taxa, atrasos, dias em falta, leitura da entrada com o horário) | Tasks 44 (`journalOverview`), 50 (`JournalCompliance`, links para `/caderno/dia/:date` da E6) e 52 |
+| RF-97b (treinos por semana e aguardando avaliação) | Tasks 44 (`trainingsPerWeek`, `pendingTrainings`) e 51 (`TrainingsPanel`) |
+| RF-98 (painel da aluna = RF-90 a RF-95 dela) | Task 52 (`DashboardScreen` só monta `MentorSections` para o mentor); RLS provada na Task 45 |
+| RF-99 (dia estudado = caderno completo, SP) | Task 44 (`studiedDays`, `journalOverview`) sobre `currentStreak` da Parte 2 |
+| RNF-11 (uso do Storage no painel do mentor) | Tasks 44 (`storageSummary`), 45 (`storage_usage()`), 46 e 50 (`StorageCard`) |
+
+## Decisões desta parte
+
+- **`journalCompliance` (Parte 2) não é usado.** Ele conta "ontem" como falta desde a meia-noite; no painel, ontem só é falta depois das 12:00 de SP (RF-50). `journalOverview` usa `journalDayStatus` (Task 33) e os dois números continuam coerentes com a tela do caderno.
+- **"Desde o início"** = primeiro dia com atividade da aluna ou entrada de caderno (`activityStart`); não há data de início da trilha no banco. Sem nenhum dos dois, o painel diz "Ainda não há dias fechados para contar."
+- **Histórico de simulados (RF-96):** a lista completa (cenário, dificuldade, notas, feedback) já é a tela de Simulados da E5; o painel mostra os 5 últimos com link, sem duplicar a tela.
+- **Aluna:** só RF-90 a RF-95 (RF-98). Caderno em falta, treinos, leitura, últimos simulados e Storage são só do mentor, no cliente e (para o Storage) no banco.
+- **Rascunho de caderno não é atividade** no mapa de calor; item marcado pelo mentor também não (só o da aluna).
+- **Recharts** entra pela Task 47 (estava só no Tech Stack); o painel é carregado sob demanda (`lazy`) para não pesar o resto do app.
+- **Limite de 1000 linhas do PostgREST** em `useActivityDays` cobre cerca de 3 anos de atividade diária; passando disso, o mapa de calor (últimas 20 semanas) continua certo, mas "desde o início" passa a usar o dia mais antigo entre as 1000 linhas.
+
+## Após a Parte 6
+
+Com as Tasks 44–53 verdes, a E7 está concluída. Ficam fora e registrados: E2E com dados reais nos gráficos (o E2E cobre estrutura, papéis e mapa de calor; o desenho dos gráficos com notas é a conferência manual da Task 53 — um simulado com duas fichas exige duas sessões e já é coberto por `simulations.spec.ts`); filtro por período nos gráficos; exportar o painel. Próximo passo: detalhar **E8 — Produção** (nova "Parte 7"): manifest e ícones do PWA, Wake Lock no treino, auditoria de acessibilidade, `pg_cron` de retenção do áudio (RF-76j), projeto Supabase de produção, convites das 2 contas e checklist de go-live.
