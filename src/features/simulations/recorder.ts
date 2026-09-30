@@ -15,20 +15,22 @@ export interface Recorder { mime: string; stop(): Promise<RecordingResult> }
 
 export interface RecorderDeps {
   getUserMedia: (constraints: MediaStreamConstraints) => Promise<MediaStream>
-  MediaRecorder: typeof MediaRecorder
+  /** Ausente em navegadores sem gravação (ex.: iOS antigo). */
+  MediaRecorder: typeof MediaRecorder | undefined
   now: () => number
 }
 
 export const browserDeps = (): RecorderDeps => ({
   getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
-  MediaRecorder,
+  MediaRecorder: globalThis.MediaRecorder,
   now: () => Date.now(),
 })
 
 /** RF-76b: áudio mono, ~24 kbps, no máximo 12 min. */
 export async function startRecording(deps: RecorderDeps = browserDeps()): Promise<Recorder> {
-  const mime = pickMime((m) => deps.MediaRecorder.isTypeSupported(m))
-  if (!mime) throw new RecorderError('Este navegador não grava áudio. Use o Chrome ou o Safari atualizado.')
+  const Ctor = deps.MediaRecorder
+  const mime = Ctor ? pickMime((m) => Ctor.isTypeSupported(m)) : null
+  if (!Ctor || !mime) throw new RecorderError('Este navegador não grava áudio. Use o Chrome ou o Safari atualizado.')
 
   let stream: MediaStream
   try {
@@ -37,12 +39,19 @@ export async function startRecording(deps: RecorderDeps = browserDeps()): Promis
     throw new RecorderError('Não foi possível usar o microfone. Libere a permissão e tente de novo.')
   }
 
-  const rec = new deps.MediaRecorder(stream, { mimeType: mime, audioBitsPerSecond: AUDIO_BITS_PER_SECOND })
   const chunks: Blob[] = []
-  rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data) }
-  const stopped = new Promise<void>((resolve) => { rec.onstop = () => resolve() })
+  let rec: MediaRecorder
+  let stopped: Promise<void>
+  try {
+    rec = new Ctor(stream, { mimeType: mime, audioBitsPerSecond: AUDIO_BITS_PER_SECOND })
+    rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data) }
+    stopped = new Promise<void>((resolve) => { rec.onstop = () => resolve() })
+    rec.start(1000)
+  } catch {
+    stream.getTracks().forEach((t) => t.stop())
+    throw new RecorderError('Este navegador não conseguiu iniciar a gravação. Use o Chrome ou o Safari atualizado.')
+  }
   const startedAt = deps.now()
-  rec.start(1000)
   const limit = setTimeout(() => { if (rec.state !== 'inactive') rec.stop() }, MAX_SECONDS * 1000)
 
   return {

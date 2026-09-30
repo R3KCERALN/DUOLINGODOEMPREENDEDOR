@@ -2,7 +2,7 @@ begin;
 -- independente das contas locais: tudo é desfeito pelo rollback no fim
 truncate public.profiles cascade;
 delete from auth.users;
-select plan(18);
+select plan(19);
 
 insert into auth.users (id, email) values
   ('00000000-0000-0000-0000-00000000000a', 'aluna@test'),
@@ -64,6 +64,11 @@ select is((select delete_after from public.simulation_recordings where simulatio
 select lives_ok($$ insert into storage.objects (bucket_id, name) values ('recordings', current_setting('t.t') || '/audio.webm') $$, 'aluna sobe o áudio na pasta do treino');
 select throws_ok($$ insert into storage.objects (bucket_id, name) values ('recordings', current_setting('t.s') || '/audio.webm') $$,
   '42501', null, 'aluna não sobe áudio na pasta de outro simulado');
+insert into public.simulation_scores (simulation_id, abertura, tom, perguntas, escuta, objecao, fechamento)
+values (current_setting('t.t')::uuid, 3, 3, 3, 3, 3, 3);
+select set_config('t.u', public.create_simulation('treino', 'facil', 'f1', false, 'obj-06', 'prof-01', 'prod-01', '{}')::text, true);
+select throws_ok($$ update public.simulation_scores set simulation_id = current_setting('t.u')::uuid
+  where simulation_id = current_setting('t.t')::uuid $$, 'P0001', 'score_immutable', 'ficha não muda de simulado');
 
 set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-00000000000b","role":"authenticated"}';
 insert into public.simulation_scores (simulation_id, abertura, tom, perguntas, escuta, objecao, fechamento)

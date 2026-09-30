@@ -65,6 +65,18 @@ test('navegador sem suporte a gravação gera erro legível', async () => {
   await expect(startRecording(deps())).rejects.toBeInstanceOf(RecorderError)
 })
 
+test('navegador sem MediaRecorder gera erro legível e nem pede o microfone', async () => {
+  const d = deps({ MediaRecorder: undefined })
+  await expect(startRecording(d)).rejects.toBeInstanceOf(RecorderError)
+  expect(d.getUserMedia).not.toHaveBeenCalled()
+})
+
+test('falha ao iniciar o MediaRecorder solta o microfone e gera erro legível', async () => {
+  const Broken = class { static isTypeSupported = () => true; constructor() { throw new Error('NotSupportedError') } }
+  await expect(startRecording(deps({ MediaRecorder: Broken as unknown as typeof MediaRecorder }))).rejects.toBeInstanceOf(RecorderError)
+  expect(track.stop).toHaveBeenCalled()
+})
+
 test('para sozinho no limite de 12 min e a duração nunca passa disso', async () => {
   const r = await startRecording(deps())
   clock = (MAX_SECONDS + 30) * 1000
