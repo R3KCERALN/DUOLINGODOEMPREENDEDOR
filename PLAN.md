@@ -14838,3 +14838,1761 @@ git commit -m "feat(e7): dashboard route, nav tab and e2e"
 ## Após a Parte 6
 
 Com as Tasks 44–53 verdes, a E7 está concluída. Ficam fora e registrados: E2E com dados reais nos gráficos (o E2E cobre estrutura, papéis e mapa de calor; o desenho dos gráficos com notas é a conferência manual da Task 53 — um simulado com duas fichas exige duas sessões e já é coberto por `simulations.spec.ts`); filtro por período nos gráficos; exportar o painel. Próximo passo: detalhar **E8 — Produção** (nova "Parte 7"): manifest e ícones do PWA, Wake Lock no treino, auditoria de acessibilidade, `pg_cron` de retenção do áudio (RF-76j), projeto Supabase de produção, convites das 2 contas e checklist de go-live.
+
+---
+
+# Parte 7 — Plano detalhado: E8 Produção
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Deixar o Trilha pronto para uso real: PWA instalável que abre sem internet, tela ligada durante o treino solo, auditoria de acessibilidade automatizada, retenção automática do áudio (RF-76j), revisão final de segurança (banco, Storage e cabeçalhos HTTP), orçamento de bundle e um checklist de go-live com tudo o que depende do usuário.
+
+**Architecture:** O front ganha `vite-plugin-pwa` (manifesto, ícones gerados das artes dither, service worker com precache do shell e atualização só quando ela aceita) e code-splitting por rota com um orçamento verificado a cada `npm run build`. A retenção do áudio é um job `pg_cron` que chama, via `pg_net`, a Edge Function `purge-recordings`; a função apaga os arquivos pela API do Storage e depois as linhas. **Não dá para apagar em SQL:** o Supabase bloqueia `delete from storage.objects` (`storage.protect_delete`, conferido no banco local) porque o arquivo ficaria órfão no Storage. A segurança é provada por pgTAP (RLS, políticas, funções, buckets) e pela CSP de produção aplicada a um E2E contra o build de produção (`vite preview`).
+
+**Tech Stack:** o da Parte 1. `vite-plugin-pwa` 1 já está no Tech Stack e **ainda não está no `package.json`** (conferido): a Task 59 instala `vite-plugin-pwa@^1` e `workbox-window@^7` (peer do plugin, usado no registro do service worker). Dev dependencies novas: `sharp` (Task 59, gera os ícones) e `@axe-core/playwright` (Task 60). A Edge Function roda em Deno e usa `npm:@supabase/supabase-js@2`, sem entrar no `package.json`.
+
+**Spec:** `PRD.md` RNF-01, RNF-03, RNF-05, RNF-06, RNF-07, RNF-10, RF-76j, §6 (PWA, `pg_cron`), §7.1 (RLS) e §10 (riscos: Wake Lock no iOS).
+
+## Global Constraints (adicionais às Partes 1–6)
+
+- **Donos de arquivo (sem conflito no `main` compartilhado):** `package.json`, `package-lock.json`, `vite.config.ts`, `index.html`, `src/main.tsx`, `src/App.tsx`, `src/features/auth/AuthProvider.tsx`, `src/design/tokens.css` → só W4 (Tasks 57, 59 e 60, nessa ordem). `playwright.config.ts`, `e2e/support.ts`, `supabase/config.toml`, `vercel.json`, `supabase/**` → só W3. `src/features/simulations/SoloTraining*` e `src/lib/useWakeLock*` → só W1 (Task 58). Cada spec E2E nova tem um único dono.
+- Migrations: `supabase/migrations/20261001000001_recording_retention.sql` (Task 55) e `20261001000002_security_hardening.sql` (Task 56). Se já existir uma com timestamp maior, use um maior que o último, mantendo a ordem 55 < 56.
+- Nenhum segredo no repositório. O `cron_secret` e a `project_url` ficam no Vault do Supabase e o `CRON_SECRET` nos secrets da Edge Function; o usuário os cria no go-live (`docs/GO-LIVE.md`). Segredo local de teste só em `supabase/functions/.env.local` (já ignorado por `*.local`).
+- O service worker **nunca recarrega a página sozinho** (`registerType: 'prompt'`): uma atualização no meio do treino perderia a gravação. Nenhuma resposta do Supabase entra no cache do service worker (dados privados, sessão e RLS).
+- CSP de produção sem `'unsafe-inline'` nem `'unsafe-eval'` em `script-src`. O que o app usa de fora: `https://*.supabase.co` (REST, Auth, Storage, URLs assinadas), `wss://*.supabase.co`, `https://www.youtube-nocookie.com` (iframe) e `blob:` (áudio e worker).
+- Specs E2E contra o build de produção terminam em `.preview.spec.ts` e rodam com `E2E_PREVIEW=1 npx playwright test` (Task 54). As demais continuam em `npx playwright test` (dev server). As duas pedem o Supabase local e `set -a; eval "$(npx supabase status -o env)"; set +a`; o `.env.local` precisa apontar para o Supabase **local**.
+- Toda função nova em `public` (migration) termina com `revoke execute on function … from public, anon` (e `grant … to authenticated` se o app a chama). O `security.test.sql` (Task 56) falha se faltar.
+- Testes em `src/` que leem arquivos do projeto começam com `/// <reference types="node" />` (o `tsconfig.app.json` só carrega `vite/client`, `vitest/globals` e `jest-dom`).
+- Visual: só tokens e componentes de `src/design` (tema cyber cassino); `font-display` só em títulos ≥ 20 px; nenhum hex em componente (o manifesto é a exceção: ele não lê CSS, e um teste o amarra a `--color-bg`).
+
+## Review Focus
+
+1. **Atualização publicada no meio de um treino:** o novo service worker fica esperando; nada recarrega sozinho; só "Atualizar" troca a versão. → teste de `UpdatePrompt` na Task 59.
+2. **Gravação que não pode sumir:** guardada (`keep`), sem nota do mentor, ou ainda no prazo nunca entra no lote; no instante exato do prazo, entra; o lote respeita o limite. → pgTAP na Task 55.
+3. **Limpeza pela metade:** se o Storage falhar, as linhas ficam para a próxima execução; se apagar as linhas falhar, a próxima execução remove de novo (remover arquivo que já não existe não é erro) e apaga as linhas. Chamada sem o segredo certo não faz nada. → `purge.test.ts` na Task 55.
+4. **CSP quebrando uma tela real:** vídeo da semana (YouTube sem cookies), Supabase (REST, Auth, Storage), painel com Recharts, banco de cenários. Nenhuma violação no console. → `csp.preview.spec.ts` na Task 56; PDF e áudio conferidos no smoke do go-live (Task 61), porque exigem arquivo enviado.
+5. **Tela apagando no treino:** o navegador solta o Wake Lock quando a aba some; ao voltar, o app pede de novo; navegador sem suporte ou que recusa não quebra o treino e mostra o aviso. → Task 58.
+
+## Ordem e paralelismo
+
+Os três donos: **W3** (harness E2E de produção, banco, cron, segurança e go-live), **W4** (bundle, PWA e acessibilidade), **W1/Codex** (uma Task pequena com código pronto).
+
+| Passo | Task | Dono | Depende de | Roda em paralelo com |
+|---|---|---|---|---|
+| 1 | 54 — Harness E2E no build de produção | **W3** | E7 concluída (Tasks 44–53) | 57, 58 |
+| 1 | 57 — Orçamento de bundle e code-splitting por rota | **W4** | E7 | 54, 58 |
+| 1 | 58 — Wake Lock no treino solo | **W1 (Codex)** | E5 (`SoloTraining`) | 54, 55, 57, 59 |
+| 2 | 55 — Retenção do áudio: `pg_cron` + Edge Function | **W3** | 54 (`config.toml`) | 58, 59 |
+| 2 | 59 — PWA: manifesto, ícones, service worker e offline | **W4** | 57 (`vite.config.ts`, `package.json`), 54 (specs `.preview`) | 55, 58 |
+| 3 | 56 — Revisão de segurança: banco, Storage e cabeçalhos | **W3** | 54, 55 | 60 |
+| 3 | 60 — Auditoria de acessibilidade | **W4** | 58, 59 | 56 |
+| 4 | 61 — `docs/GO-LIVE.md` e validação final | **W3** | 54–60 | — |
+
+**Reinício do Supabase local:** a Task 54 muda `supabase/config.toml` (URLs de redirecionamento) e precisa de `npx supabase stop && npx supabase start`. O W3 avisa o orquestrador antes, porque derruba por alguns segundos os E2E de quem estiver rodando.
+
+## Estrutura de arquivos (criada ou alterada nesta parte)
+
+```
+playwright.config.ts, e2e/support.ts, e2e/smoke.preview.spec.ts         # T54 (W3)
+supabase/config.toml                                                     # T54 (redirect 4173), T55 (função)
+supabase/migrations/20261001000001_recording_retention.sql               # T55
+supabase/tests/retention.test.sql                                        # T55
+supabase/functions/purge-recordings/{index.ts,purge.ts,purge.test.ts}    # T55
+vitest.functions.config.ts                                               # T55
+supabase/migrations/20261001000002_security_hardening.sql                # T56
+supabase/tests/security.test.sql, vercel.json                            # T56
+src/security/headers.test.ts, e2e/csp.preview.spec.ts                    # T56
+src/App.tsx, vite.config.ts, scripts/check-bundle.mjs, package.json      # T57 (W4)
+src/lib/useWakeLock.ts (+ .test.ts), src/features/simulations/SoloTraining.tsx (+ .test.tsx)   # T58 (W1)
+scripts/make-icons.mjs, public/icons/*.png, src/pwa/manifest.ts (+ .test.ts)                  # T59 (W4)
+src/lib/useOnline.ts, src/features/shell/{OfflineBanner,UpdatePrompt}.tsx (+ testes)          # T59
+src/features/auth/AuthProvider.tsx (+ AuthProvider.test.tsx): perfil guardado para o offline # T59
+index.html, src/main.tsx, tsconfig.app.json, e2e/pwa.preview.spec.ts; remove public/favicon.svg # T59
+src/design/tokens.css, src/design/contrast.test.ts, e2e/a11y.spec.ts                          # T60
+docs/GO-LIVE.md, src/security/goLive.test.ts                                                  # T61 (W3)
+```
+
+---
+
+### Task 54: Harness E2E no build de produção — **[W3]**
+
+**Files:**
+- Modify: `playwright.config.ts`, `e2e/support.ts`, `supabase/config.toml` (`additional_redirect_urls`)
+- Test: `e2e/smoke.preview.spec.ts`
+
+**Interfaces:**
+- Produces:
+  - `PREVIEW_URL = 'http://localhost:4173'` e `signIn(page, email, base = 'http://localhost:5173')` em `e2e/support.ts` (quem já chama `signIn(page, email)` não muda).
+  - `E2E_PREVIEW=1 npx playwright test` builda (`npm run build`), sobe `vite preview --port 4173` e roda só `e2e/**/*.preview.spec.ts` no projeto `preview` (Pixel 7). Sem a variável, nada muda: projeto `mobile`, dev server 5173, e as specs `.preview` ficam de fora.
+- Consumido por: Task 56 (`csp.preview.spec.ts`) e Task 59 (`pwa.preview.spec.ts`).
+
+- [ ] **Step 1: Spec de fumaça e `signIn` com origem**
+
+`e2e/smoke.preview.spec.ts`:
+```ts
+import { expect, test } from '@playwright/test'
+import { PREVIEW_URL, resetProgress, signIn, studentEmail } from './support'
+
+test.beforeEach(async () => { await resetProgress() })
+
+test('build de produção: a aluna entra por magic link e vê a tela Hoje', async ({ page }) => {
+  await signIn(page, await studentEmail(), PREVIEW_URL)
+  await expect(page.getByRole('heading', { level: 1, name: 'Hoje' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Trilha', exact: true })).toBeVisible()
+})
+```
+
+Em `e2e/support.ts`, troque a função `signIn` inteira por esta e acrescente a constante logo acima dela:
+```ts
+/** Origem do build de produção servido pelo `vite preview` (specs *.preview.spec.ts). */
+export const PREVIEW_URL = 'http://localhost:4173'
+
+/** Entra por magic link. `base` = origem do app: 5173 no dev server, PREVIEW_URL no build de produção. */
+export async function signIn(page: Page, email: string, base = 'http://localhost:5173'): Promise<void> {
+  const { data, error } = await admin.auth.admin.generateLink({
+    type: 'magiclink', email, options: { redirectTo: `${base}/` },
+  })
+  if (error) throw error
+  await page.goto(data.properties.action_link)
+  await page.waitForURL((url) => url.origin === base)
+}
+```
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vite build && (npx vite preview --port 4173 --strictPort &) && sleep 3 && npx playwright test e2e/smoke.preview.spec.ts 2>&1 | tail -12; pkill -f "vite preview"`
+Expected: FAIL — `page.waitForURL: Timeout` (o Auth local não aceita `http://localhost:4173/` como destino e manda para o `site_url` 5173).
+
+- [ ] **Step 3: Liberar o redirecionamento local e configurar o projeto `preview`**
+
+Em `supabase/config.toml`, na seção `[auth]`, a linha passa a ser:
+```toml
+additional_redirect_urls = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:4173", "http://127.0.0.1:4173"]
+```
+Avise o orquestrador e reinicie: `npx supabase stop && npx supabase start` (os dados locais ficam).
+
+`playwright.config.ts` (arquivo inteiro):
+```ts
+import { defineConfig, devices } from '@playwright/test'
+
+const DEV_URL = 'http://localhost:5173'
+const PREVIEW_URL = 'http://localhost:4173'
+// E2E_PREVIEW=1: só as specs *.preview.spec.ts, contra o build de produção (service worker, manifesto, CSP).
+const preview = process.env.E2E_PREVIEW === '1'
+
+export default defineConfig({
+  testDir: 'e2e',
+  timeout: 60_000,
+  // As specs usam as mesmas duas contas (magic link novo invalida o anterior) e apagam tabelas inteiras: rodam uma por vez.
+  workers: 1,
+  use: { trace: 'retain-on-failure' },
+  projects: preview
+    ? [{ name: 'preview', testMatch: /\.preview\.spec\.ts$/, use: { ...devices['Pixel 7'], baseURL: PREVIEW_URL } }]
+    : [{ name: 'mobile', testIgnore: /\.preview\.spec\.ts$/, use: { ...devices['Pixel 7'], baseURL: DEV_URL } }],
+  webServer: preview
+    // reuseExistingServer: false — um preview antigo testaria um build velho
+    ? { command: 'npm run build && npx vite preview --port 4173 --strictPort', url: PREVIEW_URL, reuseExistingServer: false, timeout: 240_000 }
+    : { command: 'npm run dev', url: DEV_URL, reuseExistingServer: true },
+})
+```
+
+- [ ] **Step 4: Rodar e ver passar (e o resto continuar igual)**
+
+Run: `E2E_PREVIEW=1 npx playwright test 2>&1 | tail -6 && npx playwright test e2e/trail.spec.ts 2>&1 | tail -4 && npx playwright test --list 2>&1 | grep -c preview`
+Expected: `1 passed` no preview; `trail.spec.ts` passa no dev server; a listagem normal não contém nenhuma spec `.preview` (contagem `0`).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add playwright.config.ts e2e/support.ts e2e/smoke.preview.spec.ts supabase/config.toml
+git commit -m "test(e2e): production-build preview project with magic link sign-in"
+```
+
+---
+
+### Task 55: Retenção do áudio — `pg_cron` + Edge Function `purge-recordings` — **[W3]**
+
+**Files:**
+- Create: `supabase/migrations/20261001000001_recording_retention.sql`, `supabase/functions/purge-recordings/purge.ts`, `supabase/functions/purge-recordings/index.ts`, `vitest.functions.config.ts`
+- Modify: `supabase/config.toml` (seção da função)
+- Test: `supabase/tests/retention.test.sql`, `supabase/functions/purge-recordings/purge.test.ts`
+
+**Interfaces:**
+- Consumes: `simulation_recordings.keep`/`delete_after`, calculados pelo trigger `recording_guard` (E5; `delete_after = nota do mentor + 30 dias`, `null` se guardada ou sem nota — já provado em `supabase/tests/simulations.test.sql`).
+- Produces:
+  - `public.due_recordings(p_now timestamptz default now(), p_limit int default 500) returns table (simulation_id uuid, file_path text)`: gravações com `not keep and delete_after <= p_now`, mais antigas primeiro. Só `service_role` executa.
+  - Job `pg_cron` `purge-recordings`, `15 6 * * *` (06:15 UTC = 03:15 em SP): `net.http_post` para `<project_url>/functions/v1/purge-recordings` com o cabeçalho `x-cron-secret`; `project_url` e `cron_secret` vêm do Vault (criados no go-live).
+  - `purgeDueRecordings(deps: PurgeDeps): Promise<{ purged: number }>` e `authorized(header, secret): boolean` (`purge.ts`, sem dependências: roda no Deno e no Vitest).
+  - Edge Function `purge-recordings` (`verify_jwt = false`; autentica pelo segredo): `403` sem o segredo certo; `200 {"purged": n}`; `500 {"error":"purge_failed"}`.
+
+- [ ] **Step 1: Testes**
+
+`supabase/tests/retention.test.sql`:
+```sql
+begin;
+-- independente das contas locais: tudo é desfeito pelo rollback no fim
+truncate public.profiles cascade;
+delete from auth.users;
+select plan(9);
+
+insert into auth.users (id, email) values ('00000000-0000-0000-0000-00000000000a', 'aluna@test');
+insert into public.profiles values ('00000000-0000-0000-0000-00000000000a', 'aluna', 'Aluna');
+
+-- montagem como dono do banco: o trigger recording_guard calcularia delete_after; aqui ele é fixado à mão
+alter table public.simulation_recordings disable trigger user;
+insert into public.simulations (id, mode, difficulty, phase, status, created_by, created_at)
+select ('22222222-0000-0000-0000-00000000000' || n)::uuid, 'treino', 'facil', 'f1', 'concluido',
+       '00000000-0000-0000-0000-00000000000a', '2026-08-01 12:00:00+00'
+from generate_series(1, 4) n;
+insert into public.simulation_recordings (simulation_id, file_path, mime, duration_sec, size_bytes, keep, delete_after) values
+  ('22222222-0000-0000-0000-000000000001', '22222222-0000-0000-0000-000000000001/a.webm', 'audio/webm', 300, 900000, false, '2026-09-01 12:00:00+00'), -- vencida
+  ('22222222-0000-0000-0000-000000000002', '22222222-0000-0000-0000-000000000002/a.webm', 'audio/webm', 300, 900000, true,  '2026-09-01 12:00:00+00'), -- guardada
+  ('22222222-0000-0000-0000-000000000003', '22222222-0000-0000-0000-000000000003/a.m4a',  'audio/mp4',  300, 900000, false, null),                     -- sem nota do mentor
+  ('22222222-0000-0000-0000-000000000004', '22222222-0000-0000-0000-000000000004/a.webm', 'audio/webm', 300, 900000, false, '2026-10-01 12:00:00+00'); -- no prazo
+alter table public.simulation_recordings enable trigger user;
+
+select is((select array_agg(simulation_id::text) from public.due_recordings('2026-09-30 12:00:00+00')),
+  array['22222222-0000-0000-0000-000000000001'], 'só a vencida entra: guardada, sem nota e no prazo ficam');
+select is((select array_agg(simulation_id::text order by simulation_id) from public.due_recordings('2026-10-01 12:00:00+00')),
+  array['22222222-0000-0000-0000-000000000001', '22222222-0000-0000-0000-000000000004'], 'no instante exato do prazo, vence');
+select is((select count(*)::int from public.due_recordings('2026-12-31 00:00:00+00', 1)), 1, 'respeita o tamanho do lote');
+
+select ok(not has_function_privilege('authenticated', 'public.due_recordings(timestamptz, integer)', 'execute'), 'aluna e mentor não chamam due_recordings');
+select ok(not has_function_privilege('anon', 'public.due_recordings(timestamptz, integer)', 'execute'), 'sem sessão também não');
+select ok(has_function_privilege('service_role', 'public.due_recordings(timestamptz, integer)', 'execute'), 'a Edge Function (service_role) chama');
+
+select is((select schedule from cron.job where jobname = 'purge-recordings'), '15 6 * * *', 'roda todo dia às 03:15 de SP (06:15 UTC)');
+select matches((select command from cron.job where jobname = 'purge-recordings'), '/functions/v1/purge-recordings', 'chama a Edge Function');
+select ok((select command from cron.job where jobname = 'purge-recordings') !~ 'eyJ|sb_secret', 'nenhuma chave no comando do cron: URL e segredo vêm do Vault');
+
+select * from finish();
+rollback;
+```
+
+`supabase/functions/purge-recordings/purge.test.ts`:
+```ts
+import { authorized, purgeDueRecordings, type Due, type PurgeDeps } from './purge'
+
+function deps(due: Due[], over: Partial<PurgeDeps> = {}) {
+  const calls: string[] = []
+  const d: PurgeDeps = {
+    due: vi.fn(async () => due),
+    removeFiles: vi.fn(async (paths: string[]) => { calls.push(`files:${paths.join(',')}`) }),
+    deleteRows: vi.fn(async (ids: string[]) => { calls.push(`rows:${ids.join(',')}`) }),
+    ...over,
+  }
+  return { d, calls }
+}
+
+test('nada vencido: não mexe no Storage nem no banco', async () => {
+  const { d } = deps([])
+  expect(await purgeDueRecordings(d)).toEqual({ purged: 0 })
+  expect(d.removeFiles).not.toHaveBeenCalled()
+  expect(d.deleteRows).not.toHaveBeenCalled()
+})
+
+test('vencidas: apaga os arquivos e só depois as linhas (RF-76j)', async () => {
+  const { d, calls } = deps([{ simulation_id: 'a', file_path: 'a/1.webm' }, { simulation_id: 'b', file_path: 'b/1.m4a' }])
+  expect(await purgeDueRecordings(d)).toEqual({ purged: 2 })
+  expect(calls).toEqual(['files:a/1.webm,b/1.m4a', 'rows:a,b'])
+})
+
+test('Storage falhou: as linhas ficam para a próxima execução (Review Focus 3)', async () => {
+  const { d } = deps([{ simulation_id: 'a', file_path: 'a/1.webm' }], {
+    removeFiles: vi.fn(async () => { throw new Error('storage down') }),
+  })
+  await expect(purgeDueRecordings(d)).rejects.toThrow('storage down')
+  expect(d.deleteRows).not.toHaveBeenCalled()
+})
+
+test('só aceita a chamada com o segredo certo, e segredo fraco não vale', () => {
+  const secret = 'x'.repeat(32)
+  expect(authorized(secret, secret)).toBe(true)
+  expect(authorized(null, secret)).toBe(false)
+  expect(authorized('errado', secret)).toBe(false)
+  expect(authorized('', undefined)).toBe(false)
+  expect(authorized('curto', 'curto')).toBe(false)
+})
+```
+
+`vitest.functions.config.ts` (os testes da Edge Function ficam fora de `src/`, então têm config própria):
+```ts
+import { defineConfig } from 'vitest/config'
+
+export default defineConfig({
+  test: { globals: true, environment: 'node', include: ['supabase/functions/**/*.test.ts'] },
+})
+```
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx supabase test db 2>&1 | grep -E "retention|Failed|not ok" | head -8; npx vitest run -c vitest.functions.config.ts 2>&1 | tail -6`
+Expected: FAIL — pgTAP: `function public.due_recordings(unknown) does not exist`; Vitest: `Failed to resolve import "./purge"`.
+
+- [ ] **Step 3: Implementar**
+
+`supabase/migrations/20261001000001_recording_retention.sql`:
+```sql
+-- RF-76j: o áudio é apagado 30 dias depois da nota do mentor (delete_after, calculado pelo recording_guard da E5).
+-- O arquivo sai pela API do Storage (Edge Function purge-recordings): o Supabase bloqueia delete direto em
+-- storage.objects (storage.protect_delete), que deixaria o arquivo órfão ocupando o 1 GB do plano gratuito.
+create extension if not exists pg_cron;
+create extension if not exists pg_net with schema extensions;
+
+create or replace function public.due_recordings(p_now timestamptz default now(), p_limit int default 500)
+returns table (simulation_id uuid, file_path text)
+language sql stable set search_path = '' as $$
+  select r.simulation_id, r.file_path
+  from public.simulation_recordings r
+  where not r.keep and r.delete_after is not null and r.delete_after <= p_now
+  order by r.delete_after
+  limit greatest(p_limit, 0)
+$$;
+revoke execute on function public.due_recordings(timestamptz, int) from public, anon, authenticated;
+grant execute on function public.due_recordings(timestamptz, int) to service_role;
+
+-- 06:15 UTC = 03:15 em SP. URL do projeto e segredo ficam no Vault (docs/GO-LIVE.md), nunca no repositório.
+select cron.schedule('purge-recordings', '15 6 * * *', $cron$
+  select net.http_post(
+    url := (select decrypted_secret from vault.decrypted_secrets where name = 'project_url') || '/functions/v1/purge-recordings',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-cron-secret', (select decrypted_secret from vault.decrypted_secrets where name = 'cron_secret')),
+    body := '{}'::jsonb,
+    timeout_milliseconds := 60000);
+$cron$);
+```
+
+`supabase/functions/purge-recordings/purge.ts`:
+```ts
+/** RF-76j: apaga do Storage e do banco as gravações vencidas. Sem dependências: roda no Deno (Edge Function) e no Vitest. */
+export interface Due { simulation_id: string; file_path: string }
+
+export interface PurgeDeps {
+  /** Gravações vencidas (`public.due_recordings()`). */
+  due(): Promise<Due[]>
+  /** Remove os arquivos do bucket `recordings`; lança em erro. Remover arquivo que já não existe não é erro. */
+  removeFiles(paths: string[]): Promise<void>
+  /** Apaga as linhas; lança em erro. */
+  deleteRows(ids: string[]): Promise<void>
+}
+
+export async function purgeDueRecordings(deps: PurgeDeps): Promise<{ purged: number }> {
+  const due = await deps.due()
+  if (due.length === 0) return { purged: 0 }
+  // Arquivo primeiro: se apagar as linhas falhar, a próxima execução encontra as mesmas linhas e termina o serviço.
+  await deps.removeFiles(due.map((d) => d.file_path))
+  await deps.deleteRows(due.map((d) => d.simulation_id))
+  return { purged: due.length }
+}
+
+/** Só o cron chama: cabeçalho `x-cron-secret` igual ao secret `CRON_SECRET` (≥ 32 caracteres). */
+export function authorized(header: string | null, secret: string | undefined): boolean {
+  return secret !== undefined && secret.length >= 32 && header === secret
+}
+```
+
+`supabase/functions/purge-recordings/index.ts`:
+```ts
+import { createClient } from 'npm:@supabase/supabase-js@2'
+import { authorized, purgeDueRecordings } from './purge.ts'
+
+// SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY são injetados pelo Supabase em toda Edge Function.
+const db = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!, {
+  auth: { persistSession: false, autoRefreshToken: false },
+})
+
+Deno.serve(async (req) => {
+  if (req.method !== 'POST' || !authorized(req.headers.get('x-cron-secret'), Deno.env.get('CRON_SECRET'))) {
+    return new Response('forbidden', { status: 403 })
+  }
+  try {
+    const result = await purgeDueRecordings({
+      async due() {
+        const { data, error } = await db.rpc('due_recordings')
+        if (error) throw error
+        return data ?? []
+      },
+      async removeFiles(paths) {
+        const { error } = await db.storage.from('recordings').remove(paths)
+        if (error) throw error
+      },
+      async deleteRows(ids) {
+        // keep = false de novo: se o mentor marcou "guardar" neste meio-tempo, a linha fica
+        const { error } = await db.from('simulation_recordings').delete().in('simulation_id', ids).eq('keep', false)
+        if (error) throw error
+      },
+    })
+    return Response.json(result)
+  } catch (e) {
+    console.error('purge-recordings', e)
+    return Response.json({ error: 'purge_failed' }, { status: 500 })
+  }
+})
+```
+
+Em `supabase/config.toml`, no fim do arquivo:
+```toml
+# RF-76j: chamada só pelo pg_cron, autenticada pelo cabeçalho x-cron-secret (a função confere o CRON_SECRET).
+[functions.purge-recordings]
+verify_jwt = false
+```
+
+- [ ] **Step 4: Aplicar a migration e rodar os testes**
+
+Run: `npx supabase migration up --local 2>&1 | tail -3 && npx supabase test db 2>&1 | tail -4 && npx vitest run -c vitest.functions.config.ts 2>&1 | tail -4`
+Expected: migration aplicada; `All tests successful` (inclui `retention.test.sql`, 9 testes); Vitest `4 passed`.
+
+- [ ] **Step 5: Conferência manual da função no Supabase local**
+
+Run:
+```bash
+printf 'CRON_SECRET=%s\n' "$(openssl rand -hex 32)" > supabase/functions/.env.local
+(npx supabase functions serve purge-recordings --env-file supabase/functions/.env.local &) ; sleep 8
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:55321/functions/v1/purge-recordings
+curl -s -X POST -H "x-cron-secret: $(cut -d= -f2 supabase/functions/.env.local)" http://127.0.0.1:55321/functions/v1/purge-recordings; echo
+pkill -f "functions serve"
+```
+Expected: `403`, depois `{"purged":0}` (ou o número de gravações vencidas no banco local). `git status` não mostra `supabase/functions/.env.local`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add supabase/migrations/20261001000001_recording_retention.sql supabase/tests/retention.test.sql supabase/functions/purge-recordings/purge.ts supabase/functions/purge-recordings/purge.test.ts supabase/functions/purge-recordings/index.ts vitest.functions.config.ts supabase/config.toml
+git commit -m "feat(db): daily pg_cron job purging recordings 30 days after mentor review via edge function"
+```
+
+---
+
+### Task 56: Revisão de segurança — banco, Storage e cabeçalhos HTTP — **[W3]**
+
+**Files:**
+- Create: `supabase/migrations/20261001000002_security_hardening.sql`
+- Modify: `vercel.json`
+- Test: `supabase/tests/security.test.sql`, `src/security/headers.test.ts`, `e2e/csp.preview.spec.ts`
+
+**Interfaces:**
+- Consumes: `PREVIEW_URL`, `signIn(page, email, base)` (Task 54); `due_recordings` (Task 55).
+- Produces:
+  - Banco: nenhuma função de `public` executável sem sessão (`anon`); o teste falha se uma migration futura esquecer o `revoke`. O resto do RLS da §7.1 provado por pgTAP (tabelas, políticas, views, funções `security definer`, buckets).
+  - `vercel.json`: cabeçalhos de segurança (CSP, `nosniff`, `DENY`, `Referrer-Policy`, `Permissions-Policy`, HSTS), cache imutável em `/assets/*` e `no-cache` em `/sw.js`; o rewrite da SPA continua.
+
+Estado conferido no banco local antes desta Task: todas as tabelas de `public` com RLS; todas as políticas `to authenticated`; as 4 views com `security_invoker`; funções `security definer` com `search_path`; os 2 buckets privados. **Achado:** `anon` executa `my_role`, `both_scored`, `journal_window`, `create_simulation` e as funções de trigger. O RLS já barra o efeito (sem sessão não há linha visível nem política de escrita), mas `both_scored` é `security definer` e responderia sobre qualquer simulado. A migration fecha isso.
+
+- [ ] **Step 1: Testes**
+
+`supabase/tests/security.test.sql`:
+```sql
+begin;
+select plan(9);
+
+select is(array(select c.relname::text from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relkind in ('r', 'p') and not c.relrowsecurity), '{}'::text[],
+  'RNF-03: toda tabela de public tem RLS');
+select is(array(select schemaname || '.' || tablename || '.' || policyname from pg_policies
+  where schemaname in ('public', 'storage') and roles <> '{authenticated}'), '{}'::text[],
+  'toda política vale só para quem tem sessão');
+select is(array(select c.relname::text from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relkind = 'v' and not coalesce('security_invoker=true' = any(c.reloptions), false)), '{}'::text[],
+  'views respeitam o RLS de quem consulta (security_invoker)');
+select is(array(select p.proname::text from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname = 'public' and p.prosecdef
+    and not exists (select 1 from unnest(coalesce(p.proconfig, '{}')) c where c like 'search_path=%')), '{}'::text[],
+  'funções security definer fixam o search_path');
+select is(array(select p.proname::text from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname = 'public' and has_function_privilege('anon', p.oid, 'execute')
+    and not exists (select 1 from pg_depend d where d.objid = p.oid and d.deptype = 'e')), '{}'::text[],
+  'sem sessão, nenhuma função do app executa');
+
+select is(array(select id::text from storage.buckets where public), '{}'::text[], 'RNF-08: nenhum bucket público');
+select is((select file_size_limit from storage.buckets where id = 'books'), 52428800::bigint, 'livros até 50 MB');
+select is((select allowed_mime_types from storage.buckets where id = 'recordings'), array['audio/*'], 'gravações: só áudio');
+
+insert into auth.users (id, email) values ('00000000-0000-0000-0000-0000000000cc', 'probe@test');
+insert into public.profiles values ('00000000-0000-0000-0000-0000000000cc', 'aluna', 'Probe');
+set local role anon;
+select is((select count(*)::int from public.profiles), 0, 'sem sessão não lê nem os perfis');
+
+select * from finish();
+rollback;
+```
+
+`src/security/headers.test.ts`:
+```ts
+/// <reference types="node" />
+import { readFileSync } from 'node:fs'
+
+interface Header { key: string; value: string }
+const vercel = JSON.parse(readFileSync('vercel.json', 'utf8')) as {
+  rewrites: { source: string; destination: string }[]
+  headers?: { source: string; headers: Header[] }[]
+}
+const bySource = (source: string) => vercel.headers?.find((h) => h.source === source)?.headers
+const header = (key: string) => bySource('/(.*)')?.find((h) => h.key === key)?.value
+const csp = new Map((header('Content-Security-Policy') ?? '').split(';').map((d) => d.trim()).filter(Boolean)
+  .map((d) => { const [name, ...values] = d.split(/\s+/); return [name, values] as const }))
+
+test('CSP: script só do próprio site, sem inline nem eval', () => {
+  expect(csp.get('default-src')).toEqual(["'self'"])
+  expect(csp.get('script-src')).toEqual(["'self'", "'wasm-unsafe-eval'"])
+  expect(csp.get('object-src')).toEqual(["'none'"])
+  expect(csp.get('base-uri')).toEqual(["'self'"])
+  expect(csp.get('frame-ancestors')).toEqual(["'none'"])
+  expect(csp.has('upgrade-insecure-requests')).toBe(true)
+})
+
+test('CSP: libera só o que o app usa — Supabase, vídeo sem cookies, áudio e worker', () => {
+  expect(csp.get('connect-src')).toEqual(["'self'", 'https://*.supabase.co', 'wss://*.supabase.co'])
+  expect(csp.get('media-src')).toEqual(["'self'", 'blob:', 'https://*.supabase.co'])
+  expect(csp.get('frame-src')).toEqual(['https://www.youtube-nocookie.com'])
+  expect(csp.get('worker-src')).toEqual(["'self'", 'blob:'])
+  expect(csp.get('img-src')).toEqual(["'self'", 'data:', 'blob:'])
+})
+
+test('demais cabeçalhos de segurança', () => {
+  expect(header('X-Content-Type-Options')).toBe('nosniff')
+  expect(header('X-Frame-Options')).toBe('DENY')
+  // o player do YouTube exige o Referer com a origem: "no-referrer" quebraria os vídeos da trilha
+  expect(header('Referrer-Policy')).toBe('strict-origin-when-cross-origin')
+  expect(header('Permissions-Policy')).toBe('camera=(), geolocation=(), microphone=(self), screen-wake-lock=(self)')
+  expect(header('Strict-Transport-Security')).toMatch(/^max-age=\d{8,}/)
+})
+
+test('SPA continua indo para o index.html; assets imutáveis; service worker nunca em cache', () => {
+  expect(vercel.rewrites).toEqual([{ source: '/(.*)', destination: '/index.html' }])
+  expect(bySource('/assets/(.*)')).toEqual([{ key: 'Cache-Control', value: 'public, max-age=31536000, immutable' }])
+  expect(bySource('/sw.js')).toEqual([{ key: 'Cache-Control', value: 'no-cache' }])
+})
+```
+
+`e2e/csp.preview.spec.ts`:
+```ts
+import { readFileSync } from 'node:fs'
+import { expect, test, type Page } from '@playwright/test'
+import { mentorEmail, PREVIEW_URL, resetProgress, signIn, studentEmail } from './support'
+
+// O service worker responderia às navegações sem passar pelo page.route (e sem o cabeçalho): aqui ele fica desligado.
+test.use({ serviceWorkers: 'block' })
+
+const API = process.env.API_URL ?? 'http://127.0.0.1:55321'
+const vercel = JSON.parse(readFileSync('vercel.json', 'utf8')) as { headers: { source: string; headers: { key: string; value: string }[] }[] }
+const prodCsp = vercel.headers.find((h) => h.source === '/(.*)')!.headers.find((h) => h.key === 'Content-Security-Policy')!.value
+/** A mesma CSP de produção; só acrescenta o Supabase local (http, porta 55321) e tira o upgrade para https. */
+const localCsp = prodCsp
+  .replace('connect-src', `connect-src ${API} ${API.replace(/^http/, 'ws')}`)
+  .replace('media-src', `media-src ${API}`)
+  .replace(/;\s*upgrade-insecure-requests/, '')
+
+async function withProductionCsp(page: Page): Promise<string[]> {
+  const violations: string[] = []
+  page.on('console', (m) => { if (/Content Security Policy/i.test(m.text())) violations.push(m.text()) })
+  await page.route(`${PREVIEW_URL}/**`, async (route) => {
+    if (route.request().resourceType() !== 'document') return route.continue()
+    const response = await route.fetch()
+    await route.fulfill({ response, headers: { ...response.headers(), 'content-security-policy': localCsp } })
+  })
+  return violations
+}
+
+test.beforeEach(async () => { await resetProgress() })
+
+test('aluna: telas principais e o vídeo da semana sem violar a CSP (Review Focus 4)', async ({ page }) => {
+  const violations = await withProductionCsp(page)
+  await signIn(page, await studentEmail(), PREVIEW_URL)
+  const screens = [['/', 'Hoje'], ['/trilha', 'Trilha'], ['/simulados', 'Simulados'], ['/caderno', 'Caderno'],
+    ['/biblioteca', 'Biblioteca'], ['/painel', 'Seu painel']] as const
+  for (const [path, name] of screens) {
+    await page.goto(path)
+    await expect(page.getByRole('heading', { level: 1, name })).toBeVisible()
+  }
+  await page.goto('/trilha/w01')
+  const video = page.locator('iframe[src^="https://www.youtube-nocookie.com/embed/"]').first()
+  await video.scrollIntoViewIfNeeded()
+  await expect(video).toBeAttached()
+  expect(violations).toEqual([])
+})
+
+test('mentor: painel com uso do armazenamento e banco de cenários sem violar a CSP', async ({ page }) => {
+  const violations = await withProductionCsp(page)
+  await signIn(page, await mentorEmail(), PREVIEW_URL)
+  await page.goto('/painel')
+  await expect(page.getByRole('heading', { level: 1, name: 'Painel da aluna' })).toBeVisible()
+  await expect(page.getByText(/de 1,0 GB/)).toBeVisible()
+  await page.goto('/cenarios')
+  await expect(page.getByRole('heading', { level: 1, name: 'Cenários' })).toBeVisible()
+  expect(violations).toEqual([])
+})
+```
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx supabase test db 2>&1 | grep -B1 -A3 "not ok" | head -12; npx vitest run src/security/headers.test.ts 2>&1 | tail -5`
+Expected: pgTAP falha **só** em "sem sessão, nenhuma função do app executa" (lista `my_role`, `both_scored`, `journal_window`, `create_simulation`, …); os outros 8 passam (é o estado conferido acima). Vitest: 4 falhas (`vercel.json` sem `headers`).
+
+- [ ] **Step 3: Implementar**
+
+`supabase/migrations/20261001000002_security_hardening.sql`:
+```sql
+-- Revisão final (RNF-03, §7.1): sem sessão (anon) nenhuma função do app executa. O RLS já barrava o efeito,
+-- mas both_scored é security definer e responderia sobre qualquer simulado.
+-- PUBLIC tem EXECUTE por padrão e anon herda de PUBLIC: revoga dos dois e devolve a quem tem sessão.
+revoke execute on all functions in schema public from public, anon;
+grant execute on all functions in schema public to authenticated, service_role;
+-- exceções que continuam só do servidor
+revoke execute on function public.due_recordings(timestamptz, int) from authenticated;
+-- Funções futuras: o EXECUTE de PUBLIC é padrão global do Postgres e não se revoga por schema; revogar global
+-- tiraria também o EXECUTE das funções de extensões (pgTAP incluso). Por isso cada migration nova faz
+-- `revoke execute on function … from public, anon`, e o security.test.sql falha se alguém esquecer.
+```
+
+`vercel.json` (arquivo inteiro):
+```json
+{
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; media-src 'self' blob: https://*.supabase.co; frame-src https://www.youtube-nocookie.com; worker-src 'self' blob:; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests" },
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "X-Frame-Options", "value": "DENY" },
+        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
+        { "key": "Permissions-Policy", "value": "camera=(), geolocation=(), microphone=(self), screen-wake-lock=(self)" },
+        { "key": "Strict-Transport-Security", "value": "max-age=63072000; includeSubDomains" }
+      ]
+    },
+    { "source": "/assets/(.*)", "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }] },
+    { "source": "/sw.js", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] }
+  ]
+}
+```
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npx supabase migration up --local 2>&1 | tail -2 && npx supabase test db 2>&1 | tail -3 && npx vitest run src/security/headers.test.ts 2>&1 | tail -4 && npx tsc -b 2>&1 | tail -3 && E2E_PREVIEW=1 npx playwright test e2e/csp.preview.spec.ts 2>&1 | tail -6 && npx playwright test 2>&1 | tail -4`
+Expected: `All tests successful`; Vitest `4 passed`; `tsc` sem erros; `2 passed` no CSP; a suíte E2E normal inteira passa (nada quebrou para quem tem sessão depois do `revoke`). Se o E2E de CSP listar uma violação, a CSP ou o código estão errados: ajuste a diretiva **mínima** que libera a origem legítima (nunca `*` nem `'unsafe-inline'` em script) e acrescente a expectativa correspondente em `headers.test.ts`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add supabase/migrations/20261001000002_security_hardening.sql supabase/tests/security.test.sql vercel.json src/security/headers.test.ts e2e/csp.preview.spec.ts
+git commit -m "feat(security): close anon function execution, security headers and csp verified on the production build"
+```
+
+---
+
+### Task 57: Orçamento de bundle e code-splitting por rota — **[W4]**
+
+**Files:**
+- Create: `scripts/check-bundle.mjs`
+- Modify: `src/App.tsx`, `vite.config.ts` (`build`), `package.json` (`scripts.build`)
+- Test: o próprio `scripts/check-bundle.mjs` (gate do build) e `src/App.test.tsx` (já existe, não muda)
+
+**Interfaces:**
+- Produces: `npm run build` = `tsc -b && vite build && node scripts/check-bundle.mjs`, que falha o build (e o deploy da Vercel) se o JS da primeira carga passar de **170 000 bytes em gzip** ou se algum chunk `.js` passar de **500 000 bytes** (o limite do aviso do Vite). O worker do PDF.js (`.mjs`, 1,2 MB) fica de fora: é carregado só ao abrir um livro.
+- Medido antes desta Task (build de `5929c45`): entrada `index-*.js` com 626 kB (178 kB gzip), `BookScreen` 634 kB, `DashboardScreen` 420 kB. Só `react-dom` + `react-router` + `@tanstack/react-query` + `@supabase/supabase-js` já somam 495 kB (141 kB gzip), por isso o vendor é dividido em grupos. `pdf.min.mjs` sozinho tem 459 kB.
+
+- [ ] **Step 1: O gate**
+
+`scripts/check-bundle.mjs`:
+```js
+// Orçamento de bundle (RNF-05: primeira carga < 3 s em 4G). Roda depois do `vite build`; sai com 1 se estourar.
+import { readdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { gzipSync } from 'node:zlib'
+
+const DIST = process.argv[2] ?? 'dist'
+const INITIAL_GZ_BUDGET = 170_000 // JS da primeira carga (entrada + modulepreload), em gzip
+const CHUNK_RAW_LIMIT = 500_000 // nenhum chunk .js acima do aviso do Vite; o worker do PDF.js (.mjs) só carrega no leitor
+
+const html = readFileSync(join(DIST, 'index.html'), 'utf8')
+const initial = [...html.matchAll(/(?:src|href)="\/(assets\/[^"]+\.js)"/g)].map((m) => m[1])
+const initialGz = initial.reduce((sum, f) => sum + gzipSync(readFileSync(join(DIST, f))).length, 0)
+const big = readdirSync(join(DIST, 'assets'))
+  .filter((f) => f.endsWith('.js'))
+  .map((f) => [f, readFileSync(join(DIST, 'assets', f)).length])
+  .filter(([, size]) => size > CHUNK_RAW_LIMIT)
+
+const kb = (n) => `${(n / 1000).toFixed(1)} kB`
+console.log(`JS da primeira carga (gzip): ${kb(initialGz)} de ${kb(INITIAL_GZ_BUDGET)} — ${initial.join(', ')}`)
+for (const [f, size] of big) console.log(`Chunk grande demais: ${f} com ${kb(size)} (limite ${kb(CHUNK_RAW_LIMIT)})`)
+if (initial.length === 0 || initialGz > INITIAL_GZ_BUDGET || big.length > 0) {
+  console.error('Orçamento de bundle estourado.')
+  process.exit(1)
+}
+console.log('Orçamento de bundle OK.')
+```
+
+- [ ] **Step 2: Rodar no build atual e ver falhar**
+
+Run: `npx vite build 2>&1 | tail -2 && node scripts/check-bundle.mjs`
+Expected: FAIL (exit 1) — `JS da primeira carga (gzip): 178.x kB de 170.0 kB`, `Chunk grande demais: BookScreen-….js` e `index-….js`, `Orçamento de bundle estourado.`
+
+- [ ] **Step 3: Implementar**
+
+`src/App.tsx` (arquivo inteiro):
+```tsx
+import { lazy, Suspense, type ComponentType, type ReactNode } from 'react'
+import { Navigate, Route, Routes } from 'react-router'
+import { LoginScreen } from './features/auth/LoginScreen'
+import { RequireAuth } from './features/auth/RequireAuth'
+import { AppShell } from './features/shell/AppShell'
+
+/** Cada tela vira um chunk próprio (RNF-05): a primeira carga leva só o shell, o login e as bibliotecas base.
+ *  Recharts (painel) e PDF.js (leitor) continuam só nas telas que os usam. */
+function lazyScreen<K extends string, M extends Record<K, ComponentType>>(load: () => Promise<M>, name: K) {
+  return lazy(() => load().then((m) => ({ default: m[name] })))
+}
+
+const TodayScreen = lazyScreen(() => import('./features/today/TodayScreen'), 'TodayScreen')
+const TrailMap = lazyScreen(() => import('./features/trail/TrailMap'), 'TrailMap')
+const WeekScreen = lazyScreen(() => import('./features/trail/WeekScreen'), 'WeekScreen')
+const SimulationsPage = lazyScreen(() => import('./features/simulations/SimulationsPage'), 'SimulationsPage')
+const SimulationPage = lazyScreen(() => import('./features/simulations/SimulationPage'), 'SimulationPage')
+const ScenarioBankEditor = lazyScreen(() => import('./features/simulations/ScenarioBankEditor'), 'ScenarioBankEditor')
+const CadernoLayout = lazyScreen(() => import('./features/journal/CadernoLayout'), 'CadernoLayout')
+const JournalScreen = lazyScreen(() => import('./features/journal/JournalScreen'), 'JournalScreen')
+const NotesScreen = lazyScreen(() => import('./features/notes/NotesScreen'), 'NotesScreen')
+const NoteEditor = lazyScreen(() => import('./features/notes/NoteEditor'), 'NoteEditor')
+const ChecklistsScreen = lazyScreen(() => import('./features/checklists/ChecklistsScreen'), 'ChecklistsScreen')
+const LibraryScreen = lazyScreen(() => import('./features/library/LibraryScreen'), 'LibraryScreen')
+const BookScreen = lazyScreen(() => import('./features/library/BookScreen'), 'BookScreen')
+const DashboardScreen = lazyScreen(() => import('./features/dashboard/DashboardScreen'), 'DashboardScreen')
+const UiPreview = lazy(() => import('./design/UiPreview'))
+
+const page = (node: ReactNode) => (
+  <Suspense fallback={<p role="status" className="p-6 text-muted">Carregando…</p>}>{node}</Suspense>
+)
+
+export function AppRoutes() {
+  return (
+    <Routes>
+      <Route path="/login" element={<LoginScreen />} />
+      {import.meta.env.DEV && <Route path="/ui" element={page(<UiPreview />)} />}
+      <Route element={<RequireAuth><AppShell /></RequireAuth>}>
+        <Route index element={page(<TodayScreen />)} />
+        <Route path="trilha" element={page(<TrailMap />)} />
+        <Route path="trilha/:nodeId" element={page(<WeekScreen />)} />
+        <Route path="simulados" element={page(<SimulationsPage />)} />
+        <Route path="simulados/:id" element={page(<SimulationPage />)} />
+        <Route path="caderno" element={page(<CadernoLayout />)}>
+          <Route index element={page(<JournalScreen />)} />
+          <Route path="dia/:date" element={page(<JournalScreen />)} />
+          <Route path="notas" element={page(<NotesScreen />)} />
+          <Route path="notas/nova" element={page(<NoteEditor />)} />
+          <Route path="notas/:id" element={page(<NoteEditor />)} />
+          <Route path="checklists" element={page(<ChecklistsScreen />)} />
+        </Route>
+        <Route path="biblioteca" element={page(<LibraryScreen />)} />
+        <Route path="biblioteca/:bookId" element={page(<BookScreen />)} />
+        <Route path="painel" element={page(<DashboardScreen />)} />
+        <Route path="cenarios" element={page(<RequireAuth role="mentor"><ScenarioBankEditor /></RequireAuth>)} />
+      </Route>
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  )
+}
+```
+
+`vite.config.ts`: acrescente `build` ao objeto do `defineConfig` (ao lado de `resolve`):
+```ts
+  build: {
+    rolldownOptions: {
+      output: {
+        // Vendor em grupos, cada um abaixo de 500 kB. Os de uso geral entram na primeira carga;
+        // pdfjs só é baixado com o leitor de livros.
+        codeSplitting: {
+          groups: [
+            { name: 'react', test: /node_modules[\\/](react|react-dom|scheduler|react-router)[\\/]/ },
+            { name: 'supabase', test: /node_modules[\\/]@supabase[\\/]/ },
+            { name: 'query', test: /node_modules[\\/]@tanstack[\\/]/ },
+            { name: 'pdfjs', test: /node_modules[\\/]pdfjs-dist[\\/]/ },
+          ],
+        },
+      },
+    },
+  },
+```
+
+`package.json`: `"build": "tsc -b && vite build && node scripts/check-bundle.mjs"`.
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npm run build 2>&1 | grep -E "primeira carga|grande demais|Orçamento|warn" ; npx vitest run src/App.test.tsx 2>&1 | tail -3 && set -a; eval "$(npx supabase status -o env)"; set +a; npx playwright test e2e/trail.spec.ts e2e/dashboard.spec.ts 2>&1 | tail -3`
+Expected: `JS da primeira carga (gzip): ~150 kB de 170.0 kB`, nenhum "Chunk grande demais", `Orçamento de bundle OK.` e nenhum aviso `Some chunks are larger than 500 kB`; `App.test.tsx` passa sem mudança; os dois E2E passam (navegação entre telas carregadas sob demanda). A primeira carga não pode incluir `pdfjs-*.js` nem `DashboardScreen-*.js` (confira na linha impressa pelo script).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/check-bundle.mjs src/App.tsx vite.config.ts package.json
+git commit -m "perf(build): route-level code splitting, vendor chunk groups and a bundle budget gate on build"
+```
+
+---
+
+### Task 58: Wake Lock no treino solo — **[W1 · Codex]**
+
+**Files:**
+- Create: `src/lib/useWakeLock.ts`
+- Modify: `src/features/simulations/SoloTraining.tsx`
+- Test: `src/lib/useWakeLock.test.ts`, `src/features/simulations/SoloTraining.test.tsx`
+
+**Interfaces:**
+- Produces: `useWakeLock(active: boolean): { supported: boolean }` — enquanto `active`, mantém a tela ligada (`navigator.wakeLock.request('screen')`); pede de novo quando a aba volta a ficar visível (o navegador solta o bloqueio ao esconder a aba); solta ao desativar ou desmontar. Sem suporte ou com recusa, não lança.
+- `SoloTraining` chama `useWakeLock(session.phase === 'recording')` e, gravando em navegador sem Wake Lock, mostra: "Este navegador não mantém a tela ligada sozinho: toque na tela de vez em quando para ela não apagar." (PRD §10: o iOS pode pausar a gravação com a tela bloqueada.)
+
+- [ ] **Step 1: Testes**
+
+`src/lib/useWakeLock.test.ts`:
+```ts
+import { renderHook, waitFor } from '@testing-library/react'
+import { useWakeLock } from './useWakeLock'
+
+interface FakeSentinel { released: boolean; release: ReturnType<typeof vi.fn> }
+
+function fakeWakeLock(request?: () => Promise<FakeSentinel>) {
+  const sentinels: FakeSentinel[] = []
+  const req = vi.fn(request ?? (async () => {
+    const s: FakeSentinel = { released: false, release: vi.fn(async () => { s.released = true }) }
+    sentinels.push(s)
+    return s
+  }))
+  Object.defineProperty(navigator, 'wakeLock', { value: { request: req }, configurable: true })
+  return { request: req, sentinels }
+}
+
+function setVisibility(state: 'visible' | 'hidden') {
+  Object.defineProperty(document, 'visibilityState', { value: state, configurable: true })
+  document.dispatchEvent(new Event('visibilitychange'))
+}
+
+afterEach(() => {
+  Reflect.deleteProperty(navigator, 'wakeLock')
+  Reflect.deleteProperty(document, 'visibilityState')
+})
+
+test('inativo: não pede nada', () => {
+  const { request } = fakeWakeLock()
+  const { result } = renderHook(() => useWakeLock(false))
+  expect(result.current.supported).toBe(true)
+  expect(request).not.toHaveBeenCalled()
+})
+
+test('ativo: pede a tela ligada; ao desativar, solta', async () => {
+  const { request, sentinels } = fakeWakeLock()
+  const { rerender } = renderHook(({ on }) => useWakeLock(on), { initialProps: { on: true } })
+  await waitFor(() => expect(sentinels).toHaveLength(1))
+  expect(request).toHaveBeenCalledWith('screen')
+  rerender({ on: false })
+  expect(sentinels[0].release).toHaveBeenCalled()
+})
+
+test('a aba sumiu e voltou: pede de novo (Review Focus 5)', async () => {
+  const { request, sentinels } = fakeWakeLock()
+  renderHook(() => useWakeLock(true))
+  await waitFor(() => expect(sentinels).toHaveLength(1))
+  sentinels[0].released = true // o navegador solta sozinho ao esconder a aba
+  setVisibility('hidden')
+  expect(request).toHaveBeenCalledTimes(1)
+  setVisibility('visible')
+  await waitFor(() => expect(request).toHaveBeenCalledTimes(2))
+})
+
+test('desmontar solta o bloqueio', async () => {
+  const { sentinels } = fakeWakeLock()
+  const { unmount } = renderHook(() => useWakeLock(true))
+  await waitFor(() => expect(sentinels).toHaveLength(1))
+  unmount()
+  expect(sentinels[0].release).toHaveBeenCalled()
+})
+
+test('sem suporte: informa e não quebra', () => {
+  const { result } = renderHook(() => useWakeLock(true))
+  expect(result.current.supported).toBe(false)
+})
+
+test('navegador recusa (bateria fraca, permissão): não lança', async () => {
+  const { request } = fakeWakeLock(async () => { throw new DOMException('denied', 'NotAllowedError') })
+  const { result } = renderHook(() => useWakeLock(true))
+  await waitFor(() => expect(request).toHaveBeenCalled())
+  expect(result.current.supported).toBe(true)
+})
+```
+
+Em `src/features/simulations/SoloTraining.test.tsx`:
+- logo abaixo de `vi.mock('./useTrainingSession')`, acrescente:
+```ts
+vi.mock('@/lib/useWakeLock', () => ({ useWakeLock: vi.fn(() => ({ supported: true })) }))
+```
+- nos imports, acrescente `import { useWakeLock } from '@/lib/useWakeLock'`;
+- no fim do arquivo, acrescente:
+```ts
+test('a tela fica ligada só enquanto grava (PRD §10)', () => {
+  setup(session())
+  expect(useWakeLock).toHaveBeenLastCalledWith(false)
+  setup(session({ phase: 'recording' }))
+  expect(useWakeLock).toHaveBeenLastCalledWith(true)
+})
+
+test('gravando em navegador sem Wake Lock: avisa para tocar na tela', () => {
+  vi.mocked(useWakeLock).mockReturnValue({ supported: false })
+  setup(session({ phase: 'recording' }))
+  expect(screen.getByText(/não mantém a tela ligada sozinho/)).toBeVisible()
+})
+```
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/lib/useWakeLock.test.ts src/features/simulations/SoloTraining.test.tsx 2>&1 | tail -10`
+Expected: FAIL — `Failed to resolve import "./useWakeLock"` e `Failed to resolve import "@/lib/useWakeLock"`.
+
+- [ ] **Step 3: Implementar**
+
+`src/lib/useWakeLock.ts`:
+```ts
+import { useEffect } from 'react'
+
+/** Mantém a tela ligada enquanto `active` (PRD §10: o iOS pode pausar a gravação com a tela bloqueada).
+ *  O navegador solta o bloqueio quando a aba some; ao voltar, pedimos de novo. Sem suporte ou com recusa, segue sem bloqueio. */
+export function useWakeLock(active: boolean): { supported: boolean } {
+  const supported = typeof navigator !== 'undefined' && 'wakeLock' in navigator
+
+  useEffect(() => {
+    if (!active || !supported) return
+    let sentinel: WakeLockSentinel | null = null
+    let cancelled = false
+
+    async function request() {
+      try {
+        const s = await navigator.wakeLock.request('screen')
+        if (cancelled) void s.release()
+        else sentinel = s
+      } catch {
+        // bateria fraca, permissão negada ou aba escondida: o treino continua, só sem o bloqueio
+      }
+    }
+    function onVisibility() {
+      if (document.visibilityState === 'visible' && (sentinel === null || sentinel.released)) void request()
+    }
+
+    void request()
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      cancelled = true
+      document.removeEventListener('visibilitychange', onVisibility)
+      if (sentinel && !sentinel.released) void sentinel.release()
+    }
+  }, [active, supported])
+
+  return { supported }
+}
+```
+
+Em `src/features/simulations/SoloTraining.tsx`:
+- nos imports, acrescente `import { useWakeLock } from '@/lib/useWakeLock'`;
+- logo depois do bloco `const session = useTrainingSession({ … })`, acrescente:
+```tsx
+  const wake = useWakeLock(session.phase === 'recording')
+```
+- dentro de `{session.phase === 'recording' && ( <> … </> )}`, logo depois de `<Badge tone="brand">● Gravando</Badge>`, acrescente:
+```tsx
+          {!wake.supported && (
+            <p className="text-sm text-streak">Este navegador não mantém a tela ligada sozinho: toque na tela de vez em quando para ela não apagar.</p>
+          )}
+```
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npx vitest run src/lib/useWakeLock.test.ts src/features/simulations 2>&1 | tail -5 && npx tsc -b 2>&1 | tail -3 && npm run lint 2>&1 | tail -3`
+Expected: PASS (6 testes do hook e todos os de `simulations`, incluindo os 2 novos); `tsc` e `oxlint` sem erros.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/lib/useWakeLock.ts src/lib/useWakeLock.test.ts src/features/simulations/SoloTraining.tsx src/features/simulations/SoloTraining.test.tsx
+git commit -m "feat(training): keep the screen awake while recording and warn when the browser cannot"
+```
+
+---
+
+### Task 59: PWA — manifesto, ícones, service worker e offline — **[W4]**
+
+**Files:**
+- Create: `scripts/make-icons.mjs`, `public/icons/{icon-192,icon-512,maskable-512,apple-touch-icon,favicon-32}.png` (gerados), `src/pwa/manifest.ts`, `src/lib/useOnline.ts`, `src/features/shell/OfflineBanner.tsx`, `src/features/shell/UpdatePrompt.tsx`
+- Modify: `package.json`, `package-lock.json`, `vite.config.ts` (plugin), `index.html`, `src/main.tsx`, `tsconfig.app.json` (`types`), `src/features/auth/AuthProvider.tsx` (perfil guardado para abrir sem internet)
+- Delete: `public/favicon.svg` (é o logo padrão do Vite)
+- Test: `src/pwa/manifest.test.ts`, `src/features/shell/OfflineBanner.test.tsx`, `src/features/shell/UpdatePrompt.test.tsx`, `src/features/auth/AuthProvider.test.tsx`, `e2e/pwa.preview.spec.ts`
+
+**Interfaces:**
+- Consumes: `PREVIEW_URL`, `signIn(page, email, base)`, projeto `preview` (Task 54); code-splitting (Task 57: todos os chunks entram no precache).
+- Produces:
+  - `MANIFEST` e `THEME` (`src/pwa/manifest.ts`): nome, `standalone`, `start_url: '/'`, `lang: 'pt-BR'`, ícones 192, 512 e 512 *maskable*; `THEME = '#0D100C'` (= `--color-bg`).
+  - Service worker `generateSW` com precache de `js, css, html, woff2, png, svg, webmanifest` e `navigateFallback: '/index.html'`; sem cache de nada do Supabase; `registerType: 'prompt'`, `injectRegister: false` (o registro é do `UpdatePrompt`, e nenhum script inline entra no HTML, por causa da CSP).
+  - `AuthProvider` guarda o último perfil em `localStorage` (`trilha.profile`) e o usa quando o banco não responde, **só para o mesmo `user.id`**; `signOut` apaga. Sem isso, logada e sem internet, o `RequireAuth` mostra "Não foi possível verificar seu acesso" e o app não abre (conferido no código da E1). O papel guardado só muda a interface: o acesso aos dados continua decidido pelo RLS.
+  - `useOnline(): boolean`; `OfflineBanner` ("Sem internet…", `role="status"`, no topo de todas as telas); `UpdatePrompt` ("Nova versão do app disponível." + "Atualizar" / "Depois", só no build de produção).
+- Ícones: recorte 160 × 160 do rosto central de `public/art/lobo3.png` (arte dither 1 bit da paleta), sobre `--color-bg`, ampliado com vizinho mais próximo (sem suavizar o dither).
+
+- [ ] **Step 1: Instalar**
+
+Run: `npm install vite-plugin-pwa@^1 workbox-window@^7 && npm install -D sharp@^0.35 2>&1 | tail -2 && grep -E '"(vite-plugin-pwa|workbox-window|sharp)"' package.json`
+Expected: as três linhas. `vite-plugin-pwa` e `workbox-window` em `dependencies` (o registro do service worker roda no app; `vite-plugin-pwa` 1.3 aceita `vite ^8`), `sharp` em `devDependencies`. Depois mova `vite-plugin-pwa` para `devDependencies` (é plugin de build) e rode `npm install` de novo para o lock refletir.
+
+- [ ] **Step 2: Testes**
+
+`src/pwa/manifest.test.ts`:
+```ts
+/// <reference types="node" />
+import { readFileSync } from 'node:fs'
+import { MANIFEST, THEME } from './manifest'
+
+/** Largura × altura de um PNG (cabeçalho IHDR, bytes 16 a 23). */
+function pngSize(publicPath: string): string {
+  const b = readFileSync(`public${publicPath}`)
+  expect(b.subarray(1, 4).toString(), publicPath).toBe('PNG')
+  return `${b.readUInt32BE(16)}x${b.readUInt32BE(20)}`
+}
+
+test('cada ícone do manifesto existe e tem o tamanho declarado', () => {
+  expect(MANIFEST.icons?.length).toBe(3)
+  for (const icon of MANIFEST.icons ?? []) expect(pngSize(icon.src), icon.src).toBe(icon.sizes)
+})
+
+test('instalável (RNF-01): nome curto, standalone, início em /, pt-BR, 512 maskable e cor = --color-bg', () => {
+  expect(MANIFEST.short_name).toBe('Trilha')
+  expect(MANIFEST.display).toBe('standalone')
+  expect(MANIFEST.start_url).toBe('/')
+  expect(MANIFEST.lang).toBe('pt-BR')
+  expect(MANIFEST.icons?.some((i) => i.purpose === 'maskable' && i.sizes === '512x512')).toBe(true)
+  expect(MANIFEST.theme_color).toBe(THEME)
+  expect(readFileSync('src/design/tokens.css', 'utf8')).toContain(`--color-bg: ${THEME};`)
+})
+
+test('o index.html aponta para os ícones do iPhone e da aba, e não para o logo do Vite', () => {
+  const html = readFileSync('index.html', 'utf8')
+  expect(html).toContain('href="/icons/apple-touch-icon.png"')
+  expect(pngSize('/icons/apple-touch-icon.png')).toBe('180x180')
+  expect(html).toContain('href="/icons/favicon-32.png"')
+  expect(pngSize('/icons/favicon-32.png')).toBe('32x32')
+  expect(html).not.toContain('favicon.svg')
+  expect(html).toContain(`<meta name="theme-color" content="${THEME}" />`)
+})
+```
+
+`src/features/shell/OfflineBanner.test.tsx`:
+```tsx
+import { act, render, screen } from '@testing-library/react'
+import { OfflineBanner } from './OfflineBanner'
+
+function setOnline(online: boolean) {
+  Object.defineProperty(navigator, 'onLine', { value: online, configurable: true })
+  window.dispatchEvent(new Event(online ? 'online' : 'offline'))
+}
+afterEach(() => { Reflect.deleteProperty(navigator, 'onLine') })
+
+test('com internet, nada aparece', () => {
+  setOnline(true)
+  render(<OfflineBanner />)
+  expect(screen.queryByRole('status')).not.toBeInTheDocument()
+})
+
+test('a conexão cai e volta: o aviso aparece e some', () => {
+  setOnline(true)
+  render(<OfflineBanner />)
+  act(() => setOnline(false))
+  expect(screen.getByRole('status')).toHaveTextContent('Sem internet. O treino e a gravação continuam')
+  act(() => setOnline(true))
+  expect(screen.queryByRole('status')).not.toBeInTheDocument()
+})
+```
+
+`src/features/shell/UpdatePrompt.test.tsx`:
+```tsx
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { useRegisterSW } from 'virtual:pwa-register/react'
+import { UpdatePrompt } from './UpdatePrompt'
+
+vi.mock('virtual:pwa-register/react', () => ({ useRegisterSW: vi.fn() }))
+
+const update = vi.fn()
+const setNeedRefresh = vi.fn()
+function mockSW(needRefresh: boolean) {
+  vi.mocked(useRegisterSW).mockReturnValue({
+    needRefresh: [needRefresh, setNeedRefresh], offlineReady: [false, vi.fn()], updateServiceWorker: update,
+  } as never)
+}
+beforeEach(() => { vi.clearAllMocks() })
+
+test('registra o service worker e, sem versão nova, não mostra nada', () => {
+  mockSW(false)
+  render(<UpdatePrompt />)
+  expect(useRegisterSW).toHaveBeenCalledWith({ immediate: true })
+  expect(screen.queryByRole('status')).not.toBeInTheDocument()
+})
+
+test('versão nova: nada recarrega sozinho; só "Atualizar" troca (Review Focus 1)', async () => {
+  mockSW(true)
+  render(<UpdatePrompt />)
+  expect(screen.getByRole('status')).toHaveTextContent('Nova versão do app disponível.')
+  expect(update).not.toHaveBeenCalled()
+  await userEvent.click(screen.getByRole('button', { name: 'Atualizar' }))
+  expect(update).toHaveBeenCalledWith(true)
+})
+
+test('"Depois" esconde o aviso sem atualizar', async () => {
+  mockSW(true)
+  render(<UpdatePrompt />)
+  await userEvent.click(screen.getByRole('button', { name: 'Depois' }))
+  expect(setNeedRefresh).toHaveBeenCalledWith(false)
+  expect(update).not.toHaveBeenCalled()
+})
+```
+
+`src/features/auth/AuthProvider.test.tsx`:
+```tsx
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { AuthProvider, useAuth } from './AuthProvider'
+
+const single = vi.fn()
+vi.mock('@/lib/supabase', () => ({
+  supabase: {
+    auth: {
+      getSession: vi.fn().mockResolvedValue({ data: { session: { user: { id: 'u1' } } } }),
+      onAuthStateChange: vi.fn(() => ({ data: { subscription: { unsubscribe: vi.fn() } } })),
+      signOut: vi.fn().mockResolvedValue({ error: null }),
+    },
+    from: vi.fn(() => ({ select: () => ({ eq: () => ({ single }) }) })),
+  },
+}))
+
+const KEY = 'trilha.profile'
+const ana = { id: 'u1', role: 'aluna', name: 'Ana' }
+const offline = { data: null, error: { message: 'TypeError: Failed to fetch' } }
+
+function Who() {
+  const { profile, loading, signOut } = useAuth()
+  return (
+    <>
+      <p>{loading ? 'carregando' : profile ? `${profile.name} (${profile.role})` : 'sem perfil'}</p>
+      <button onClick={() => void signOut()}>Sair</button>
+    </>
+  )
+}
+const renderIt = () => render(<AuthProvider><Who /></AuthProvider>)
+
+beforeEach(() => { localStorage.clear(); single.mockReset() })
+
+test('online: usa o perfil do banco e guarda para abrir sem internet', async () => {
+  single.mockResolvedValue({ data: ana, error: null })
+  renderIt()
+  expect(await screen.findByText('Ana (aluna)')).toBeInTheDocument()
+  expect(JSON.parse(localStorage.getItem(KEY)!)).toEqual(ana)
+})
+
+test('sem internet: usa o perfil guardado da mesma pessoa', async () => {
+  localStorage.setItem(KEY, JSON.stringify(ana))
+  single.mockResolvedValue(offline)
+  renderIt()
+  expect(await screen.findByText('Ana (aluna)')).toBeInTheDocument()
+})
+
+test('perfil guardado de outra pessoa não vale', async () => {
+  localStorage.setItem(KEY, JSON.stringify({ id: 'outra', role: 'mentor', name: 'X' }))
+  single.mockResolvedValue(offline)
+  renderIt()
+  expect(await screen.findByText('sem perfil')).toBeInTheDocument()
+})
+
+test('sair apaga o perfil guardado', async () => {
+  localStorage.setItem(KEY, JSON.stringify(ana))
+  single.mockResolvedValue({ data: ana, error: null })
+  renderIt()
+  await screen.findByText('Ana (aluna)')
+  await userEvent.click(screen.getByRole('button', { name: 'Sair' }))
+  await waitFor(() => expect(localStorage.getItem(KEY)).toBeNull())
+})
+```
+
+`e2e/pwa.preview.spec.ts`:
+```ts
+import { expect, test } from '@playwright/test'
+import { PREVIEW_URL, resetProgress, signIn, studentEmail } from './support'
+
+test.beforeEach(async () => { await resetProgress() })
+
+async function waitForServiceWorker(page: import('@playwright/test').Page) {
+  await page.evaluate(() => navigator.serviceWorker.ready.then(() => undefined))
+  await page.reload()
+  await expect.poll(() => page.evaluate(() => navigator.serviceWorker.controller !== null)).toBe(true)
+}
+
+test('instalável: manifesto com nome, standalone e ícones que existem (RNF-01)', async ({ page, request }) => {
+  await page.goto('/login')
+  const href = await page.locator('link[rel="manifest"]').getAttribute('href')
+  expect(href).not.toBeNull()
+  const manifest = await (await request.get(new URL(href!, PREVIEW_URL).toString())).json()
+  expect(manifest).toMatchObject({ short_name: 'Trilha', display: 'standalone', start_url: '/', lang: 'pt-BR' })
+  for (const icon of manifest.icons) expect((await request.get(new URL(icon.src, PREVIEW_URL).toString())).ok(), icon.src).toBe(true)
+})
+
+test('sem internet depois da primeira visita, o app ainda abre (login e rota interna)', async ({ page, context }) => {
+  await page.goto('/login')
+  await waitForServiceWorker(page)
+  await context.setOffline(true)
+  await page.reload()
+  await expect(page.getByRole('heading', { level: 1, name: 'Entrar' })).toBeVisible()
+  await page.goto('/trilha')
+  await expect(page.getByRole('heading', { level: 1, name: 'Entrar' })).toBeVisible() // sem sessão, cai no login — servido do cache
+  await context.setOffline(false)
+})
+
+test('logada e sem internet: o shell abre com o aviso e a navegação', async ({ page, context }) => {
+  await signIn(page, await studentEmail(), PREVIEW_URL)
+  await expect(page.getByRole('heading', { level: 1, name: 'Hoje' })).toBeVisible()
+  await waitForServiceWorker(page)
+  await context.setOffline(true)
+  await page.reload()
+  await expect(page.getByRole('status').filter({ hasText: 'Sem internet' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Trilha', exact: true })).toBeVisible()
+  await context.setOffline(false)
+})
+```
+
+- [ ] **Step 3: Rodar e ver falhar**
+
+Run: `npx vitest run src/pwa src/features/shell src/features/auth 2>&1 | tail -10`
+Expected: FAIL — `Failed to resolve import "./manifest"`, `"./OfflineBanner"` e `"./UpdatePrompt"`; em `AuthProvider.test.tsx`, falham "online…" (`localStorage` vazio), "sem internet…" (mostra "sem perfil") e "sair…"; "perfil de outra pessoa" já passa. (O E2E roda no Step 6, depois do build.)
+
+- [ ] **Step 4: Gerar os ícones**
+
+`scripts/make-icons.mjs`:
+```js
+// Ícones do PWA a partir da arte dither 1 bit (public/art/lobo3.png): recorte do rosto central sobre --color-bg,
+// ampliado com vizinho mais próximo para o dither não borrar. Rode de novo só se a arte ou o recorte mudarem.
+import { mkdirSync } from 'node:fs'
+import sharp from 'sharp'
+
+const SRC = 'public/art/lobo3.png'
+const CROP = { left: 145, top: 30, width: 160, height: 160 } // rosto central; confira a saída a olho depois de mudar
+const BG = '#0D100C' // --color-bg
+const OUT = 'public/icons'
+
+async function icon(file, size, pad) {
+  const inner = Math.round(size * (1 - 2 * pad))
+  const art = await sharp(SRC).extract(CROP).resize(inner, inner, { kernel: 'nearest' }).png().toBuffer()
+  await sharp({ create: { width: size, height: size, channels: 4, background: BG } })
+    .composite([{ input: art, gravity: 'center' }])
+    .flatten({ background: BG })
+    .png({ compressionLevel: 9 })
+    .toFile(`${OUT}/${file}`)
+  console.log(`${OUT}/${file} ${size}x${size}`)
+}
+
+mkdirSync(OUT, { recursive: true })
+await icon('icon-192.png', 192, 0.04)
+await icon('icon-512.png', 512, 0.04)
+await icon('maskable-512.png', 512, 0.12) // área segura do maskable: o círculo central de 80%
+await icon('apple-touch-icon.png', 180, 0.04) // iOS não aceita transparência: fundo chapado
+await icon('favicon-32.png', 32, 0)
+```
+
+Run: `node scripts/make-icons.mjs`
+Expected: os 5 arquivos listados. Abra `public/icons/icon-512.png` e `public/icons/maskable-512.png` (Read) e confira: rosto inteiro, verde-limão sobre fundo quase preto, pontos nítidos. Se o rosto estiver cortado, ajuste só `CROP.left`/`CROP.top` e rode de novo.
+
+- [ ] **Step 5: Implementar**
+
+`src/pwa/manifest.ts`:
+```ts
+import type { ManifestOptions } from 'vite-plugin-pwa'
+
+/** = --color-bg (src/design/tokens.css). O manifesto não lê CSS; o teste amarra os dois. */
+export const THEME = '#0D100C'
+
+export const MANIFEST: Partial<ManifestOptions> = {
+  name: 'Trilha: de iniciante a empresária e grande vendedora',
+  short_name: 'Trilha',
+  description: 'Trilha de estudo de comunicação e vendas, com caderno, simulados e painel.',
+  lang: 'pt-BR',
+  start_url: '/',
+  scope: '/',
+  display: 'standalone',
+  orientation: 'portrait',
+  background_color: THEME,
+  theme_color: THEME,
+  icons: [
+    { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+    { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+    { src: '/icons/maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+  ],
+}
+```
+
+`vite.config.ts`: importe `import { VitePWA } from 'vite-plugin-pwa'` e `import { MANIFEST } from './src/pwa/manifest.ts'` (o `tsconfig.node.json` usa `module: nodenext`, que exige a extensão), e acrescente ao fim de `plugins`:
+```ts
+    VitePWA({
+      // Nunca recarrega sozinho: uma atualização no meio do treino perderia a gravação (UpdatePrompt pergunta).
+      registerType: 'prompt',
+      // O registro é feito pelo UpdatePrompt (virtual:pwa-register/react); nenhum script inline no HTML (CSP).
+      injectRegister: false,
+      manifest: MANIFEST,
+      includeAssets: ['icons/apple-touch-icon.png', 'icons/favicon-32.png'],
+      workbox: {
+        // Shell e todas as telas (chunks da Task 57). O worker do PDF.js (.mjs, 1,2 MB) fica de fora:
+        // ler um livro exige internet de qualquer jeito (URL assinada do Storage).
+        globPatterns: ['**/*.{js,css,html,woff2,png,svg,webmanifest}'],
+        navigateFallback: '/index.html',
+        cleanupOutdatedCaches: true,
+        // Sem runtimeCaching: nada do Supabase (dados privados, sessão) vai para o cache.
+      },
+    }),
+```
+
+`tsconfig.app.json`: `"types": ["vite/client", "vitest/globals", "@testing-library/jest-dom", "vite-plugin-pwa/react"]`.
+
+`src/features/auth/AuthProvider.tsx`: acrescente, logo abaixo de `const AuthContext = …`:
+```ts
+/** Perfil da última sessão, para o app abrir sem internet (PWA). Só vale para a mesma pessoa;
+ *  o papel só muda a interface — quem decide o acesso aos dados é o RLS. */
+const PROFILE_KEY = 'trilha.profile'
+
+function readCachedProfile(userId: string): Profile | null {
+  try {
+    const p = JSON.parse(localStorage.getItem(PROFILE_KEY) ?? 'null') as Profile | null
+    return p?.id === userId ? p : null
+  } catch {
+    return null
+  }
+}
+
+function writeCachedProfile(p: Profile | null) {
+  try {
+    if (p) localStorage.setItem(PROFILE_KEY, JSON.stringify(p))
+    else localStorage.removeItem(PROFILE_KEY)
+  } catch {
+    // aba anônima ou armazenamento cheio: segue sem o modo offline
+  }
+}
+```
+e troque o `.then` da busca do perfil e o `signOut` por:
+```ts
+      .then(({ data }) => {
+        const fresh = data as Profile | null
+        if (fresh) writeCachedProfile(fresh)
+        setProfile(fresh ?? readCachedProfile(session.user.id))
+        setLoading(false)
+      })
+```
+```ts
+  const signOut = async () => { writeCachedProfile(null); await supabase.auth.signOut() }
+```
+
+`src/lib/useOnline.ts`:
+```ts
+import { useSyncExternalStore } from 'react'
+
+function subscribe(onChange: () => void) {
+  window.addEventListener('online', onChange)
+  window.addEventListener('offline', onChange)
+  return () => {
+    window.removeEventListener('online', onChange)
+    window.removeEventListener('offline', onChange)
+  }
+}
+
+/** true com conexão. `navigator.onLine` só erra para o lado otimista (rede sem internet de verdade). */
+export function useOnline(): boolean {
+  return useSyncExternalStore(subscribe, () => navigator.onLine, () => true)
+}
+```
+
+`src/features/shell/OfflineBanner.tsx`:
+```tsx
+import { useOnline } from '@/lib/useOnline'
+
+/** Sem internet o app abre do cache (PWA); o treino grava e a fila envia o áudio quando a conexão voltar (E5). */
+export function OfflineBanner() {
+  const online = useOnline()
+  if (online) return null
+  return (
+    <p role="status" className="sticky top-0 z-40 border-b border-edge bg-raised px-4 py-2 text-center text-sm font-bold text-streak">
+      Sem internet. O treino e a gravação continuam; o envio e o resto do app voltam quando a conexão voltar.
+    </p>
+  )
+}
+```
+
+`src/features/shell/UpdatePrompt.tsx`:
+```tsx
+import { useRegisterSW } from 'virtual:pwa-register/react'
+import { Button } from '@/design/ui'
+
+/** Registra o service worker. Versão nova só entra quando ela toca em "Atualizar": recarregar sozinho no meio de um treino perderia a gravação. */
+export function UpdatePrompt() {
+  const { needRefresh: [needRefresh, setNeedRefresh], updateServiceWorker } = useRegisterSW({ immediate: true })
+  if (!needRefresh) return null
+  return (
+    <div role="status" className="fixed inset-x-4 bottom-24 z-50 mx-auto flex max-w-md items-center gap-3 rounded-card border border-edge bg-raised p-3">
+      <p className="flex-1 text-sm">Nova versão do app disponível.</p>
+      <Button size="sm" onClick={() => void updateServiceWorker(true)}>Atualizar</Button>
+      <Button size="sm" variant="secondary" onClick={() => setNeedRefresh(false)}>Depois</Button>
+    </div>
+  )
+}
+```
+
+`src/main.tsx`: importe `OfflineBanner` e `UpdatePrompt` de `./features/shell/…` e troque a linha do router por:
+```tsx
+      <BrowserRouter>
+        <AuthProvider>
+          <OfflineBanner />
+          <AppRoutes />
+          {/* Só no build de produção existe service worker para registrar. */}
+          {import.meta.env.PROD && <UpdatePrompt />}
+        </AuthProvider>
+      </BrowserRouter>
+```
+
+`index.html`: troque `<link rel="icon" type="image/svg+xml" href="/favicon.svg" />` por:
+```html
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-title" content="Trilha" />
+    <meta name="description" content="Trilha de estudo de comunicação e vendas, com caderno, simulados e painel." />
+```
+e apague `public/favicon.svg` (`git rm public/favicon.svg`).
+
+- [ ] **Step 6: Rodar e ver passar**
+
+Run: `npx vitest run src/pwa src/features/shell src/features/auth src/App.test.tsx 2>&1 | tail -4 && npx tsc -b 2>&1 | tail -3 && npm run build 2>&1 | grep -E "precache|Orçamento|sw.js" && set -a; eval "$(npx supabase status -o env)"; set +a; E2E_PREVIEW=1 npx playwright test 2>&1 | tail -6`
+Expected: Vitest PASS (3 + 2 + 3 + 4 testes novos, os de `AppShell`, `auth.test.tsx` e `App.test.tsx`); `tsc` sem erros; o build lista `sw.js`, o precache (sem `pdf.worker`) e `Orçamento de bundle OK.`; no preview, `pwa.preview.spec.ts` (3 testes) e as demais `.preview` passam. Conferência manual (Chrome do desktop, `npx vite preview`): DevTools → Application → Manifest sem erros e com "Installable"; Lighthouse → PWA "Installable" verde.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git rm -q public/favicon.svg
+git add package.json package-lock.json vite.config.ts index.html tsconfig.app.json src/main.tsx src/features/auth/AuthProvider.tsx src/features/auth/AuthProvider.test.tsx scripts/make-icons.mjs public/icons src/pwa src/lib/useOnline.ts src/features/shell/OfflineBanner.tsx src/features/shell/OfflineBanner.test.tsx src/features/shell/UpdatePrompt.tsx src/features/shell/UpdatePrompt.test.tsx e2e/pwa.preview.spec.ts
+git commit -m "feat(pwa): installable manifest with dither icons, precached shell, offline banner and update prompt"
+```
+
+---
+
+### Task 60: Auditoria de acessibilidade — **[W4]**
+
+**Files:**
+- Modify: `package.json`, `package-lock.json` (`@axe-core/playwright` em dev), `src/design/tokens.css` (foco visível global)
+- Test: `e2e/a11y.spec.ts`, `src/design/contrast.test.ts`
+- Modify (conforme o que o axe apontar): o componente de origem de cada violação e o teste dele
+
+**Interfaces:**
+- Consumes: telas das E4–E7, `signIn`, `studentEmail`, `mentorEmail`, `resetProgress` (`e2e/support.ts`); `Wake Lock` (Task 58) e `OfflineBanner`/`UpdatePrompt` (Task 59) já montados.
+- Produces: `e2e/a11y.spec.ts` (axe WCAG 2.2 A/AA nas telas principais das duas contas, foco visível por teclado, `prefers-reduced-motion`); `src/design/contrast.test.ts` (contraste AA dos pares de tokens de texto, RNF-06); regra global de foco em `tokens.css`.
+- Contraste medido dos tokens atuais (texto sobre `bg` / `surface` / `raised`): `ink` 17,6 / 16,0 / 14,0; `muted` 9,7 / 8,8 / 7,7; `brand` 10,0 / 9,1 / 8,0; `danger` 7,5 / 6,8 / 6,0; `locked` 4,9 sobre `bg` (único uso: `PathNode` bloqueado); `on-brand` sobre `brand` 9,7. `line` (2,8 sobre `raised`) é só borda decorativa, nunca texto.
+
+- [ ] **Step 1: Instalar**
+
+Run: `npm install -D @axe-core/playwright@^4 2>&1 | tail -1 && grep '"@axe-core/playwright"' package.json`
+Expected: a linha em `devDependencies`.
+
+- [ ] **Step 2: Testes**
+
+`src/design/contrast.test.ts`:
+```ts
+/// <reference types="node" />
+import { readFileSync } from 'node:fs'
+
+const css = readFileSync('src/design/tokens.css', 'utf8')
+const token = (name: string) => {
+  const m = css.match(new RegExp(`--color-${name}:\\s*(#[0-9A-Fa-f]{6});`))
+  if (!m) throw new Error(`token --color-${name} não encontrado`)
+  return m[1]
+}
+function luminance(hex: string) {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+    .map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4))
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+const ratio = (a: string, b: string) => {
+  const [hi, lo] = [luminance(token(a)), luminance(token(b))].sort((x, y) => y - x)
+  return (hi + 0.05) / (lo + 0.05)
+}
+
+test.each(['ink', 'muted', 'brand', 'brand-strong', 'success', 'streak', 'danger', 'f1', 'f2', 'f3', 'f4'])(
+  'texto %s tem contraste AA (4,5:1) sobre bg, surface e raised (RNF-06)', (fg) => {
+    for (const bg of ['bg', 'surface', 'raised']) expect(ratio(fg, bg), `${fg} sobre ${bg}`).toBeGreaterThanOrEqual(4.5)
+  })
+
+test('texto dos botões e nó bloqueado', () => {
+  expect(ratio('on-brand', 'brand')).toBeGreaterThanOrEqual(4.5)
+  expect(ratio('on-brand', 'danger')).toBeGreaterThanOrEqual(4.5)
+  expect(ratio('locked', 'bg')).toBeGreaterThanOrEqual(4.5)
+})
+```
+
+`e2e/a11y.spec.ts`:
+```ts
+import AxeBuilder from '@axe-core/playwright'
+import { expect, test, type Page } from '@playwright/test'
+import { mentorEmail, resetProgress, signIn, studentEmail } from './support'
+
+const WCAG = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa']
+
+/** Abre a tela, espera o carregamento terminar e roda o axe; a mensagem lista regra e seletor de cada violação. */
+async function audit(page: Page, path: string) {
+  await page.goto(path)
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+  await expect(page.getByRole('status').filter({ hasText: 'Carregando' })).toHaveCount(0)
+  const { violations } = await new AxeBuilder({ page }).withTags(WCAG).analyze()
+  expect(violations.map((v) => `${path} · ${v.id} · ${v.nodes.map((n) => n.target.join(' ')).join(' | ')}`)).toEqual([])
+}
+
+test.beforeEach(async () => { await resetProgress() })
+
+test('login sem violações WCAG A/AA', async ({ page }) => {
+  await audit(page, '/login')
+})
+
+test('telas da aluna sem violações WCAG A/AA (RNF-06)', async ({ page }) => {
+  await signIn(page, await studentEmail())
+  for (const path of ['/', '/trilha', '/trilha/w01', '/simulados', '/caderno', '/caderno/notas', '/caderno/checklists', '/biblioteca', '/painel']) {
+    await audit(page, path)
+  }
+})
+
+test('telas do mentor sem violações WCAG A/AA', async ({ page }) => {
+  await signIn(page, await mentorEmail())
+  for (const path of ['/', '/simulados', '/cenarios', '/painel']) await audit(page, path)
+})
+
+test('teclado: todo elemento focado com Tab mostra contorno sólido de pelo menos 2 px', async ({ page }) => {
+  await signIn(page, await studentEmail())
+  await page.goto('/caderno')
+  await expect(page.getByRole('heading', { level: 1, name: 'Caderno' })).toBeVisible()
+  const seen: string[] = []
+  for (let i = 0; i < 15; i++) {
+    await page.keyboard.press('Tab')
+    const focus = await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null
+      if (!el || el === document.body) return null
+      const s = getComputedStyle(el)
+      return { what: `${el.tagName.toLowerCase()} "${(el.textContent ?? el.getAttribute('aria-label') ?? '').trim().slice(0, 30)}"`, style: s.outlineStyle, width: parseFloat(s.outlineWidth) }
+    })
+    if (!focus) continue
+    seen.push(focus.what)
+    expect(focus.style, focus.what).toBe('solid')
+    expect(focus.width, focus.what).toBeGreaterThanOrEqual(2)
+  }
+  expect(seen.length).toBeGreaterThan(5)
+})
+
+test('prefers-reduced-motion: transições e animações viram instantâneas', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await page.goto('/login')
+  const durations = await page.getByRole('button').first().evaluate((el) => {
+    const s = getComputedStyle(el)
+    return [...s.transitionDuration.split(','), ...s.animationDuration.split(',')].map((d) => parseFloat(d))
+  })
+  for (const d of durations) expect(d).toBeLessThanOrEqual(0.001)
+})
+```
+
+- [ ] **Step 3: Rodar e ver falhar**
+
+Run: `npx vitest run src/design/contrast.test.ts 2>&1 | tail -3; set -a; eval "$(npx supabase status -o env)"; set +a; npx playwright test e2e/a11y.spec.ts 2>&1 | grep -E "✘|passed|failed|·" | head -30`
+Expected: `contrast.test.ts` **passa** (os números acima): é trava contra regressão. Prove que ela morde: troque `--color-muted` por `#636E58` em `tokens.css`, rode e veja falhar `muted sobre raised`, e desfaça. No E2E: o teste de teclado **falha** nos links (`a "Abrir o caderno"` etc.: `outline-style` `auto` com 1 px, o padrão do navegador, porque só `Button`, `BottomNav`, `Checkbox` e `PathNode` têm `focus-visible:outline-3`); o de reduced-motion passa (a regra de `tokens.css` já existe e fica fixada aqui); anote cada violação que o axe listar.
+
+- [ ] **Step 4: Corrigir**
+
+Foco visível para todo elemento interativo — em `src/design/tokens.css`, logo antes do bloco `@media (prefers-reduced-motion: reduce)`:
+```css
+/* RNF-06: foco visível para todo elemento interativo. Componentes com focus-visible:outline-* próprios (utilities) continuam valendo. */
+@layer base {
+  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 3px solid var(--color-ink);
+    outline-offset: 2px;
+  }
+}
+```
+
+Cada violação do axe se corrige **no componente de origem** (nunca desligando a regra no `AxeBuilder`), com um teste de unidade no arquivo de teste do componente que falhe antes da correção — por exemplo, `getByRole('img', { name: … })` para imagem sem `alt`, `getByRole('button', { name: … })` para botão sem nome, `getByLabelText(…)` para campo sem rótulo. Cor: só troca de token (nenhum hex novo); se um token precisar mudar, `contrast.test.ts` continua passando. Anote no corpo do commit a lista "regra → componente → correção".
+
+- [ ] **Step 5: Rodar e ver passar**
+
+Run: `npx vitest run 2>&1 | tail -3 && npx tsc -b 2>&1 | tail -3 && set -a; eval "$(npx supabase status -o env)"; set +a; npx playwright test 2>&1 | tail -4`
+Expected: suíte de unidade inteira PASS; `tsc` sem erros; a suíte E2E inteira passa, incluindo `a11y.spec.ts` (5 testes, zero violações WCAG A/AA).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add package.json package-lock.json src/design/tokens.css src/design/contrast.test.ts e2e/a11y.spec.ts
+# + os componentes e testes corrigidos no Step 4, um a um pelo caminho
+git commit -m "feat(a11y): axe audit of main screens, global focus ring, token contrast guard and reduced-motion check"
+```
+
+---
+
+### Task 61: `docs/GO-LIVE.md` e validação final — **[W3]**
+
+**Files:**
+- Create: `docs/GO-LIVE.md`
+- Test: `src/security/goLive.test.ts`
+
+**Interfaces:**
+- Consumes: tudo das Tasks 54–60 e o Step 6 da Task 12 (deploy de preview), que o `GO-LIVE.md` substitui como roteiro completo.
+- Produces: roteiro, em pt-BR e com caixas de seleção, de tudo o que depende do usuário (contas, chaves, convites, painel do Supabase e da Vercel) e do smoke no celular; um teste que impede o roteiro de ficar para trás quando o código passar a exigir um novo segredo ou configuração.
+
+- [ ] **Step 1: Teste**
+
+`src/security/goLive.test.ts`:
+```ts
+/// <reference types="node" />
+import { existsSync, readFileSync } from 'node:fs'
+
+const doc = existsSync('docs/GO-LIVE.md') ? readFileSync('docs/GO-LIVE.md', 'utf8') : ''
+
+test.each([
+  ['variáveis da Vercel', ['VITE_SUPABASE_URL', 'VITE_SUPABASE_ANON_KEY']],
+  ['banco de produção', ['supabase link', 'supabase db push', 'sa-east-1']],
+  ['retenção do áudio (Task 55)', ["vault.create_secret", "'project_url'", "'cron_secret'", 'CRON_SECRET', 'supabase functions deploy purge-recordings', 'cron.job_run_details']],
+  ['Auth (RF-03)', ['Site URL', 'Redirect URLs', 'Allow new users to sign up', 'insert into public.profiles']],
+  ['segurança (Task 56)', ['Content-Security-Policy', 'securityheaders.com']],
+  ['smoke no celular', ['Adicionar à Tela de Início', 'modo avião', 'gravação', 'PDF', 'Wake Lock']],
+  ['plano gratuito', ['pausa', '1 GB']],
+])('GO-LIVE cobre %s', (_, needles) => {
+  for (const n of needles) expect(doc, n).toContain(n)
+})
+```
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/security/goLive.test.ts 2>&1 | tail -4`
+Expected: FAIL — 7 falhas (o arquivo não existe).
+
+- [ ] **Step 3: Escrever `docs/GO-LIVE.md`**
+
+````markdown
+# Go-live do Trilha
+
+Roteiro para colocar o app em produção. Marque cada caixa. **[você]** = passo que só o dono das contas faz; **[dev]** = comando no terminal do projeto. Nenhuma chave vai para o repositório: elas ficam na Vercel, no Vault do Supabase e nos secrets das Edge Functions.
+
+## 1. Contas [você]
+
+- [ ] GitHub: repositório **privado** com o código (`git push`).
+- [ ] Supabase: projeto novo no plano Free, região **South America (São Paulo) — sa-east-1**. Guarde a senha do banco num gerenciador de senhas.
+- [ ] Vercel: projeto importando o repositório do GitHub (framework Vite, build `npm run build`, saída `dist`).
+
+## 2. Banco de produção [dev]
+
+- [ ] `npx supabase login` e `npx supabase link --project-ref <ref>` (o `<ref>` está na URL do painel do projeto).
+- [ ] `npx supabase db push` — aplica todas as migrations, inclusive `pg_cron`, `pg_net`, a retenção e o endurecimento de segurança.
+- [ ] Painel → Database → Extensions: `pg_cron` e `pg_net` aparecem ativas.
+- [ ] Painel → Storage: buckets `books` e `recordings` existem e estão **privados**.
+
+## 3. Retenção do áudio (RF-76j) [dev + você]
+
+- [ ] Gere o segredo: `openssl rand -hex 32` (guarde; ele vai em dois lugares).
+- [ ] SQL Editor do painel:
+  ```sql
+  select vault.create_secret('https://<ref>.supabase.co', 'project_url');
+  select vault.create_secret('<segredo>', 'cron_secret');
+  ```
+- [ ] `npx supabase secrets set CRON_SECRET=<segredo>`
+- [ ] `npx supabase functions deploy purge-recordings --no-verify-jwt`
+- [ ] Teste: `curl -s -X POST -H "x-cron-secret: <segredo>" https://<ref>.supabase.co/functions/v1/purge-recordings` → `{"purged":0}`; sem o cabeçalho → `forbidden` (403).
+- [ ] No dia seguinte: `select status, return_message, start_time from cron.job_run_details order by start_time desc limit 3;` → `succeeded` às 06:15 UTC (03:15 em SP).
+
+## 4. Autenticação [você]
+
+- [ ] Authentication → Sign In / Providers → Email: ligado. **Allow new users to sign up: desligado** (RF-03; o `enable_signup = false` do `config.toml` vale só no local).
+- [ ] Authentication → URL Configuration → **Site URL** = `https://<domínio de produção>`; **Redirect URLs** = `https://<domínio de produção>/**` e, para os previews da Vercel, `https://*-<time>.vercel.app/**`.
+- [ ] Authentication → Users → **Invite user** para os 2 e-mails (aluna e mentor). Depois, no SQL Editor:
+  ```sql
+  insert into public.profiles (id, role, name) select id, 'aluna', '<Nome da aluna>' from auth.users where email = '<e-mail da aluna>';
+  insert into public.profiles (id, role, name) select id, 'mentor', '<Nome do mentor>' from auth.users where email = '<e-mail do mentor>';
+  ```
+- [ ] O e-mail do Supabase Free tem limite baixo por hora: suficiente para 2 pessoas; se o magic link demorar, espere antes de pedir outro.
+
+## 5. Vercel [você]
+
+- [ ] Settings → Environment Variables (Production e Preview): `VITE_SUPABASE_URL` = `https://<ref>.supabase.co` e `VITE_SUPABASE_ANON_KEY` = a chave pública (anon/publishable) do painel → Project Settings → API. Nenhuma outra chave vai para a Vercel.
+- [ ] Deploy. O `npm run build` falha se o orçamento de bundle estourar (Task 57): leia a mensagem do `check-bundle` no log.
+- [ ] (Opcional) Domínio próprio em Settings → Domains; depois volte ao passo 4 e troque a Site URL.
+
+## 6. Cabeçalhos de segurança [dev]
+
+- [ ] `curl -sI https://<domínio> | grep -iE "content-security-policy|x-frame-options|strict-transport"` → as três linhas.
+- [ ] https://securityheaders.com com o domínio → nota A ou melhor.
+
+## 7. Smoke no celular [você]
+
+No Android (Chrome) e no iPhone (Safari), com as duas contas:
+
+- [ ] Login por magic link abre o app já logado.
+- [ ] Instalar: Android → menu → "Instalar app"; iPhone → Compartilhar → **Adicionar à Tela de Início**. O ícone é o lobo em dither sobre fundo escuro e o app abre sem a barra do navegador.
+- [ ] Trilha → semana 1: o vídeo do YouTube toca.
+- [ ] Biblioteca (mentor envia um PDF de teste; aluna abre): o **PDF** aparece e a página é lembrada ao voltar.
+- [ ] Treino solo de 1 minuto: a tela não apaga (Wake Lock; no iPhone, iOS 16.4 ou mais novo), a **gravação** é enviada e o mentor ouve no "Treinos para avaliar".
+- [ ] Ative o **modo avião** com o app aberto: aparece "Sem internet"; feche e abra o app: ele abre do cache. Desative o modo avião: tudo volta.
+- [ ] Painel do mentor mostra o uso do Storage; o da aluna não.
+- [ ] Publique uma mudança qualquer: com o app aberto aparece "Nova versão do app disponível"; "Atualizar" recarrega.
+- [ ] No Chrome do computador, com o app aberto em DevTools → Console: nenhuma mensagem de Content-Security-Policy durante o roteiro acima.
+
+## 8. Plano gratuito [você]
+
+- [ ] O Supabase Free **pausa** o projeto depois de 7 dias sem uso. Com o uso diário não acontece; se acontecer, painel → Restore project (os dados ficam).
+- [ ] Storage de **1 GB**: o painel do mentor avisa a partir de 80%. Livros até 50 MB; áudio apagado 30 dias depois da nota (a menos que "Guardar").
+- [ ] Sem backup automático no Free: de vez em quando, `npx supabase db dump --data-only -f backup-<data>.sql` (guarde fora do repositório).
+````
+
+- [ ] **Step 4: Rodar e ver passar; validação final da E8**
+
+Run:
+```bash
+npx vitest run src/security/goLive.test.ts 2>&1 | tail -3
+npm run lint 2>&1 | tail -2 && npm test 2>&1 | tail -3 && npx vitest run -c vitest.functions.config.ts 2>&1 | tail -2
+npx supabase test db 2>&1 | tail -2 && npm run build 2>&1 | grep Orçamento
+set -a; eval "$(npx supabase status -o env)"; set +a
+npx playwright test 2>&1 | tail -3 && E2E_PREVIEW=1 npx playwright test 2>&1 | tail -3
+```
+Expected: `goLive.test.ts` 7 passed; `oxlint` sem erros; `npm test` inteiro PASS; testes da Edge Function PASS; `All tests successful`; `Orçamento de bundle OK.`; as duas suítes E2E passam.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add docs/GO-LIVE.md src/security/goLive.test.ts
+git commit -m "docs: go-live checklist for accounts, secrets, auth, retention job and phone smoke test"
+```
+
+---
+
+## Cobertura dos requisitos da E8
+
+| Requisito | Onde |
+|---|---|
+| RNF-01 (instalável como PWA) | Task 59 (manifesto, ícones, service worker, `pwa.preview.spec.ts`) e smoke do go-live (Task 61) |
+| RNF-03 (RLS em tudo, nada anônimo) | Task 56 (`security.test.sql`: tabelas, políticas, views, funções; `anon` sem EXECUTE) |
+| RNF-05 (primeira carga < 3 s em 4G) | Task 57 (code-splitting por rota, grupos de vendor, orçamento no build) |
+| RNF-06 (contraste AA, teclado, reduced-motion) | Task 60 (axe nas telas das duas contas, foco visível global, `contrast.test.ts`, reduced-motion) |
+| RNF-07 (nenhum segredo no front) | Tasks 55 (segredos no Vault e nos secrets da função) e 61 (só `VITE_SUPABASE_URL`/`ANON_KEY` na Vercel) |
+| RNF-08 (buckets privados) | Task 56 (pgTAP dos buckets) |
+| RNF-10 (gravação Chrome/Android e Safari/iOS) | Já na E5 (`recorder.ts`, `isTypeSupported`); conferido no aparelho no smoke da Task 61 |
+| RF-76j (áudio apagado 30 dias após a avaliação, exceto "guardar") | Task 55 (`due_recordings`, `pg_cron`, Edge Function `purge-recordings`) sobre o `recording_guard` da E5 |
+| §7.1 (regras de RLS e de Storage) | Task 56; as regras por tabela já estão provadas nos pgTAP das Partes 2–6 |
+| §10 (iOS pausa a gravação com a tela bloqueada) | Task 58 (Wake Lock + aviso) |
+| Go-live (projeto de produção, convites, domínio) | Task 61 (`docs/GO-LIVE.md`), substituindo o Step 6 da Task 12 |
+
+## Decisões desta parte
+
+- **Arquivos de áudio saem pela API do Storage, não por SQL.** O Supabase bloqueia `delete from storage.objects` (`storage.protect_delete`) e, liberando, o arquivo ficaria órfão ocupando o 1 GB. Por isso o `pg_cron` chama a Edge Function `purge-recordings`, que remove os arquivos e depois as linhas (nessa ordem, para a próxima execução completar o que falhar).
+- **A Edge Function se autentica por segredo compartilhado** (`x-cron-secret` = `CRON_SECRET`, também guardado no Vault), com `verify_jwt = false`: projetos novos do Supabase usam chaves `publishable` que não são JWT. A função não aceita parâmetros; chamá-la só faz o que o cron faria.
+- **"Fechar cadernos do dia anterior" (PRD §6) não vira job:** o prazo do caderno é regra do banco na hora da escrita (`journal_window`, E1/E6); não há estado a fechar.
+- **CSP com `https://*.supabase.co`** em vez do ref do projeto (o ref só existe no go-live; o curinga continua preso ao domínio do Supabase). `style-src 'unsafe-inline'` fica por causa de estilos em atributo (Recharts, PDF.js); `script-src` não tem inline nem eval; `'wasm-unsafe-eval'` cobre os decodificadores WebAssembly do PDF.js.
+- **O orçamento de bundle roda dentro do `npm run build`:** um deploy que estoure o orçamento falha na Vercel com a mensagem do `check-bundle`, em vez de ficar lento em silêncio.
+- **Perfil guardado no aparelho (`trilha.profile`)** para o app abrir logado sem internet; só vale para o mesmo `user.id` e sai no "Sair". Não é segredo (nome e papel) e não dá acesso a nada: o RLS continua decidindo.
+- **Service worker com `prompt`, não `autoUpdate`:** recarregar sozinho no meio de um treino perderia a gravação. O worker do PDF.js fica fora do precache (1,2 MB; ler livro exige internet). Nenhuma resposta do Supabase entra no cache.
+- **Ícones do PWA** vêm do rosto central de `lobo3.png` (arte dither da E2), ampliados sem suavização; o script fica no repositório para regerar se a arte mudar.
+- **E2E contra o build de produção** é uma suíte separada (`E2E_PREVIEW=1`, specs `.preview`): service worker, manifesto e CSP só existem no build; a suíte normal continua rápida no dev server.
+
+## Após a Parte 7
+
+Com as Tasks 54–61 verdes e o `docs/GO-LIVE.md` cumprido, o Trilha está em produção e a v1 do PRD está entregue. Ficam fora e registrados: backup automático (exige plano pago do Supabase; o roteiro manda fazer `db dump` de vez em quando), monitoramento de erros no front, notificações push e a v2 com IA no treino (PRD §10).
