@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { Badge, Button, Card, Checkbox, TextArea } from '@/design/ui'
 import { noteLinkFromParams, noteLinkLabel, noteLinkPath, type NoteLink } from '@/domain/notes'
@@ -19,7 +19,14 @@ function NoteForm({ id, initial, link }: { id: string; initial: Note | null; lin
   const [draft, setDraft] = useState({ title: initial?.title ?? '', body: initial?.body ?? '', private: initial?.private ?? true, link: initial?.link ?? link })
   const [preview, setPreview] = useState(false)
   const [confirming, setConfirming] = useState(false)
-  const autosave = useAutosave({ value: draft, save: (v) => save.mutateAsync({ id, ...v }), enabled: editable })
+  // Depois de pedir a exclusão, nenhum salvamento (nem o de sair da tela) pode recriar a nota.
+  const deleting = useRef(false)
+  const autosave = useAutosave({ value: draft, save: async (v) => { if (!deleting.current) await save.mutateAsync({ id, ...v }) }, enabled: editable })
+  const confirmDelete = async () => {
+    await autosave.flush()
+    deleting.current = true
+    remove.mutate(id, { onSuccess: () => navigate('/caderno/notas'), onError: () => { deleting.current = false } })
+  }
   const isMentor = profile?.role === 'mentor'
 
   return (
@@ -50,7 +57,7 @@ function NoteForm({ id, initial, link }: { id: string; initial: Note | null; lin
           {initial && (
             <div className="flex gap-2">
               {confirming
-                ? <Button size="sm" variant="danger" loading={remove.isPending} onClick={() => remove.mutate(id, { onSuccess: () => navigate('/caderno/notas') })}>Confirmar exclusão</Button>
+                ? <Button size="sm" variant="danger" loading={remove.isPending} onClick={() => { void confirmDelete() }}>Confirmar exclusão</Button>
                 : <Button size="sm" variant="ghost" onClick={() => setConfirming(true)}>Apagar nota</Button>}
             </div>
           )}

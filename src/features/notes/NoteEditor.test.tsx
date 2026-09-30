@@ -103,6 +103,20 @@ test('apagar pede confirmação e volta para a lista', async () => {
   expect(await screen.findByText('lista de notas')).toBeInTheDocument()
 })
 
+test('apagar com edição pendente salva antes e não recria a nota depois', async () => {
+  const order: string[] = []
+  saveAsync.mockImplementation(async () => { order.push('save') })
+  remove.mockImplementation((_id: string, o: { onSuccess: () => void }) => { order.push('delete'); o.onSuccess() })
+  setup('/caderno/notas/n1')
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+  fireEvent.change(screen.getByLabelText('Título'), { target: { value: 'Ideias novas' } })
+  await user.click(screen.getByRole('button', { name: 'Apagar nota' }))
+  await user.click(screen.getByRole('button', { name: 'Confirmar exclusão' }))
+  expect(await screen.findByText('lista de notas')).toBeInTheDocument()
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+  expect(order).toEqual(['save', 'delete'])
+})
+
 test('nota inexistente', () => {
   setup('/caderno/notas/sumiu', { note: null })
   expect(screen.getByRole('alert')).toHaveTextContent('Nota não encontrada')
