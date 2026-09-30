@@ -27,6 +27,7 @@ export function SoloTraining({ simulationId, scenario, cards, durationSec, onDon
   const wake = useWakeLock(session.phase === 'recording')
   const [saveError, setSaveError] = useState<string | null>(null)
   const finalizing = useRef(false)
+  const [queued, setQueued] = useState(false)
 
   async function finalize() {
     setSaveError(null)
@@ -34,6 +35,7 @@ export function SoloTraining({ simulationId, scenario, cards, durationSec, onDon
       const rec = await session.finish()
       let outcome: UploadOutcome | 'sem_audio' = 'sem_audio'
       if (rec) outcome = await upload.mutateAsync({ simulationId, blob: rec.blob, mime: rec.mime, durationSec: rec.durationSec })
+      setQueued(outcome === 'queued')
       await advance.mutateAsync({ id: simulationId, to: 'aguardando_notas' })
       onDone(outcome)
     } catch (e) {
@@ -99,6 +101,7 @@ export function SoloTraining({ simulationId, scenario, cards, durationSec, onDon
         saveError ? (
           <div className="flex flex-col gap-3">
             <p role="alert" className="text-danger">{saveError}</p>
+            {queued && <p role="status" className="font-bold">Gravação pendente de envio. Ela sobe sozinha quando a conexão voltar.</p>}
             <Button onClick={() => { finalizing.current = true; void finalize() }}>Tentar de novo</Button>
           </div>
         ) : <p role="status" className="text-muted">Salvando o treino…</p>

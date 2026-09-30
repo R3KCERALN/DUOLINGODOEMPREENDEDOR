@@ -16,4 +16,15 @@ export async function uploadRecording(r: PendingRecording): Promise<void> {
   if (rowError) throw rowError
 }
 
-export const recordingQueue = createRecordingQueue(idbStore, uploadRecording)
+/**
+ * Reenvio da fila: além do áudio, tira o simulado de "em andamento". Se a aluna ficou sem rede ao encerrar,
+ * o avanço da tela falhou e o áudio veio para a fila; sem isto o simulado ficaria parado mesmo com o áudio já no servidor.
+ * Condicional (`status = em_andamento`): se a tela já avançou o simulado, não muda nada.
+ */
+export async function uploadAndAdvance(r: PendingRecording): Promise<void> {
+  await uploadRecording(r)
+  const { error } = await supabase.from('simulations').update({ status: 'aguardando_notas' }).eq('id', r.simulationId).eq('status', 'em_andamento')
+  if (error) throw error
+}
+
+export const recordingQueue = createRecordingQueue(idbStore, uploadAndAdvance)

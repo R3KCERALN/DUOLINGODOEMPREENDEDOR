@@ -152,6 +152,38 @@ test('upload que falha vira "pendente" e é reenviado depois (RF-76g); arquivo j
   expect(calls.filter((c) => c.method === 'upload').map((c) => c.args[0])).toEqual(['s9/audio.m4a', 's9/audio.m4a'])
 })
 
+test('reenvio de gravação guardada também tira o simulado de "em andamento" (só se ainda estiver nele)', async () => {
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useUploadRecording(), { wrapper: Wrapper })
+  results['storage:upload'] = [{ data: null, error: { message: 'Failed to fetch' } }]
+  await act(async () => { await result.current.mutateAsync({ simulationId: 's7', blob: new Blob(['x']), mime: 'audio/webm', durationSec: 60 }) })
+  expect(calls.some((c) => c.table === 'simulations')).toBe(false)
+
+  const pending = renderHook(() => usePendingRecordings(), { wrapper: Wrapper })
+  await waitFor(() => expect(pending.result.current.pending).toBe(0))
+  const sim = calls.filter((c) => c.table === 'simulations')
+  expect(sim.find((c) => c.method === 'update')!.args[0]).toEqual({ status: 'aguardando_notas' })
+  expect(sim.filter((c) => c.method === 'eq').map((c) => c.args)).toEqual([['id', 's7'], ['status', 'em_andamento']])
+})
+
+test('sem rede o item continua na fila; quando o evento "online" chega, ele sobe sozinho (RF-76g)', async () => {
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useUploadRecording(), { wrapper: Wrapper })
+  results['storage:upload'] = [
+    { data: null, error: { message: 'Failed to fetch' } }, // envio original
+    { data: null, error: { message: 'Failed to fetch' } }, // reenvio ao abrir o app, ainda sem rede
+  ]
+  await act(async () => { await result.current.mutateAsync({ simulationId: 's8', blob: new Blob(['x']), mime: 'audio/webm', durationSec: 60 }) })
+
+  const pending = renderHook(() => usePendingRecordings(), { wrapper: Wrapper })
+  await waitFor(() => expect(calls.filter((c) => c.method === 'upload')).toHaveLength(2))
+  await waitFor(() => expect(pending.result.current.pending).toBe(1))
+
+  await act(async () => { window.dispatchEvent(new Event('online')) })
+  await waitFor(() => expect(pending.result.current.pending).toBe(0))
+  expect(calls.filter((c) => c.method === 'upload')).toHaveLength(3)
+})
+
 test('reenvio trata "já existe" no Storage como sucesso', async () => {
   const { Wrapper } = setup()
   results['storage:upload'] = [{ data: null, error: { message: 'The resource already exists' } }]

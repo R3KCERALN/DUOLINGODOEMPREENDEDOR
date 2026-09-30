@@ -1,6 +1,6 @@
 import { useLocation, useNavigate, useParams } from 'react-router'
 import { SimulationDetail } from './SimulationDetail'
-import { useSimulation } from './hooks'
+import { usePendingRecordings, useSimulation } from './hooks'
 import { SoloTraining } from './SoloTraining'
 import type { TrainingPlan } from './types'
 
@@ -13,6 +13,7 @@ export function SimulationPage() {
   const location = useLocation()
   const navigate = useNavigate()
   const detail = useSimulation(id)
+  usePendingRecordings() // reenvia a gravação guardada quando a rede volta, mesmo fora da lista de simulados
   const plan = (location.state as { plan?: TrainingPlan } | null)?.plan
   const data = detail.data
 

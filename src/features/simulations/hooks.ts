@@ -204,7 +204,7 @@ export function usePendingRecordings(): PendingRecordings {
   const flush = useCallback(async () => {
     const { sent } = await recordingQueue.flush()
     await qc.invalidateQueries({ queryKey: PENDING })
-    if (sent > 0) await qc.invalidateQueries({ queryKey: SIMS })
+    if (sent > 0) await Promise.all([qc.invalidateQueries({ queryKey: SIMS }), qc.invalidateQueries({ queryKey: ['simulation'] })])
   }, [qc])
   useEffect(() => {
     void flush()

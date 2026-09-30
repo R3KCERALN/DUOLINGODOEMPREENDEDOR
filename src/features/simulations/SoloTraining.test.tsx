@@ -90,6 +90,22 @@ test('falha ao salvar mostra erro e permite tentar de novo', async () => {
   await waitFor(() => expect(onDone).toHaveBeenCalled())
 })
 
+test('sem rede ao encerrar: áudio guardado e avanço falho mostram "gravação pendente de envio", sem esconder o erro', async () => {
+  uploadAsync.mockResolvedValue('queued')
+  advanceAsync.mockRejectedValueOnce(new Error('Failed to fetch'))
+  const onDone = setup(session({ phase: 'finished' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('Failed to fetch')
+  expect(screen.getByRole('status')).toHaveTextContent('Gravação pendente de envio')
+  expect(onDone).not.toHaveBeenCalled()
+})
+
+test('erro sem gravação guardada não fala em envio pendente', async () => {
+  advanceAsync.mockRejectedValueOnce(new Error('Você não pode alterar este simulado.'))
+  setup(session({ phase: 'finished' }))
+  expect(await screen.findByRole('alert')).toBeInTheDocument()
+  expect(screen.queryByText(/pendente de envio/)).not.toBeInTheDocument()
+})
+
 test('cada carta mostrada é registrada com o segundo em que apareceu (RF-76f)', () => {
   setup(session())
   const opts = vi.mocked(useTrainingSession).mock.calls[0][0]

@@ -32,6 +32,11 @@ test('treino recém-sorteado com plano vai para a tela de treino, cartas nos hor
   expect(screen.getByText('treino 300 45:Pergunta A|130:Fala B')).toBeInTheDocument()
 })
 
+test('a página religa o reenvio das gravações pendentes (evento online e abertura do app)', () => {
+  renderAt(detailOf({ summary: summaryOf({ mode: 'treino', status: 'aguardando_notas' }), cards }))
+  expect(sim.usePendingRecordings).toHaveBeenCalled()
+})
+
 test('sem plano (página recarregada) cai no detalhe em vez de reiniciar o treino', () => {
   renderAt(detailOf({ summary: summaryOf({ mode: 'treino', status: 'em_andamento' }), cards }))
   expect(screen.getByText('detalhe')).toBeInTheDocument()
