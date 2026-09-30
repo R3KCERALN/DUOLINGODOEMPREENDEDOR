@@ -33,7 +33,13 @@ export function TodayScreen() {
   const next = trail.data.next
 
   return (
-    <main className="mx-auto flex max-w-md flex-col gap-6 px-4 pt-6 pb-8">
+    <main className="mx-auto flex max-w-md flex-col gap-6 px-4 pb-8">
+      <div aria-hidden className="relative -mx-4 h-40 overflow-hidden">
+        <img src="/art/lobo2.png" alt="" width={480} height={360}
+          className="pixelated size-full object-cover object-[50%_30%] opacity-80" />
+        <div className="absolute inset-0 scanlines" />
+        <div className="absolute inset-x-0 bottom-0 h-8 dither-fade" />
+      </div>
       <header className="flex items-end justify-between gap-3">
         <div>
           <p className="font-bold text-muted first-letter:uppercase">{longDate.format(now)}</p>
@@ -68,9 +74,9 @@ export function TodayScreen() {
                 <Link to="/caderno"
                   className={`flex min-h-12 items-center justify-between gap-3 rounded-control border-2 px-3 font-bold
                     focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-ink
-                    ${journalDone ? 'border-edge text-muted' : 'border-streak bg-surface'}`}>
+                    ${journalDone ? 'border-edge text-muted' : 'border-brand bg-surface glow'}`}>
                   <span>{withMinutes(item)}</span>
-                  <Badge tone={journalDone ? 'success' : 'streak'}>{journalDone ? 'Feito' : 'Obrigatório'}</Badge>
+                  <Badge tone={journalDone ? 'muted' : 'brand'}>{journalDone ? 'Feito' : 'Obrigatório'}</Badge>
                 </Link>
               ) : (
                 <Checkbox checked={isDone(item)} label={withMinutes(item)}

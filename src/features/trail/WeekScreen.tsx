@@ -94,7 +94,9 @@ export function WeekScreen() {
         <p className="text-sm text-muted">{doneCount} de {required.length} obrigatórios</p>
       </div>
       {isNodeComplete(node, done) && (
-        <Card className="flex flex-col gap-2 border-brand">
+        <Card className="flex flex-col gap-2 overflow-hidden border-brand">
+          <img src="/art/lobo4.png" alt="" width={480} height={270}
+            className="pixelated -mx-4 -mt-4 mb-1 block h-32 w-[calc(100%+2rem)] max-w-none object-cover object-[50%_35%]" />
           <p role="status" className="font-bold">{doneMsg}</p>
           <Link to="/trilha" className={linkClass}>Ver a trilha</Link>
         </Card>
