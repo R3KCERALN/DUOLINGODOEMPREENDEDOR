@@ -40,3 +40,8 @@ test('rotas do caderno e da biblioteca exigem login', async () => {
     unmount()
   }
 })
+
+test('rota do painel exige login', async () => {
+  render(<MemoryRouter initialEntries={['/painel']}><AuthProvider><AppRoutes /></AuthProvider></MemoryRouter>)
+  expect(await screen.findByRole('heading', { name: 'Entrar' })).toBeInTheDocument()
+})

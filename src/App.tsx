@@ -19,6 +19,8 @@ import { WeekScreen } from './features/trail/WeekScreen'
 const UiPreview = lazy(() => import('./design/UiPreview'))
 // O leitor de PDF (PDF.js) é pesado: só carrega quando alguém abre um livro.
 const BookScreen = lazy(() => import('./features/library/BookScreen').then((m) => ({ default: m.BookScreen })))
+// O Recharts é pesado: o painel só carrega quando alguém abre a aba.
+const DashboardScreen = lazy(() => import('./features/dashboard/DashboardScreen').then((m) => ({ default: m.DashboardScreen })))
 
 export function AppRoutes() {
   return (
@@ -41,6 +43,7 @@ export function AppRoutes() {
         </Route>
         <Route path="biblioteca" element={<LibraryScreen />} />
         <Route path="biblioteca/:bookId" element={<Suspense fallback={<p role="status" className="p-6 text-muted">Carregando…</p>}><BookScreen /></Suspense>} />
+        <Route path="painel" element={<Suspense fallback={<p role="status" className="p-6 text-muted">Carregando…</p>}><DashboardScreen /></Suspense>} />
         <Route path="cenarios" element={<RequireAuth role="mentor"><ScenarioBankEditor /></RequireAuth>} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

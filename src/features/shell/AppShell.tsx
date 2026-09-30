@@ -6,6 +6,7 @@ const NAV = [
   { to: '/trilha', label: 'Trilha', icon: <PixelIcon name="trail" /> },
   { to: '/simulados', label: 'Simulados', icon: <PixelIcon name="reels" /> },
   { to: '/caderno', label: 'Caderno', icon: <PixelIcon name="notes" /> },
+  { to: '/painel', label: 'Painel', icon: <PixelIcon name="chart" /> },
 ]
 
 export function AppShell() {
