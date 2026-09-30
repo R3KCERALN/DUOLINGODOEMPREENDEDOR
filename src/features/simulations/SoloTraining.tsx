@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Badge, Button, Card } from '@/design/ui'
+import { useWakeLock } from '@/lib/useWakeLock'
 import { mmss } from './format'
 import { useAdvanceSimulation, useRecordCardShown, useUploadRecording } from './hooks'
 import type { Scenario, UploadOutcome } from './types'
@@ -23,6 +24,7 @@ export function SoloTraining({ simulationId, scenario, cards, durationSec, onDon
     durationSec, cards,
     onCardShown: (c, atSec) => shown.mutate({ simulationId, position: c.position, atSec }),
   })
+  const wake = useWakeLock(session.phase === 'recording')
   const [saveError, setSaveError] = useState<string | null>(null)
   const finalizing = useRef(false)
 
@@ -77,6 +79,9 @@ export function SoloTraining({ simulationId, scenario, cards, durationSec, onDon
             {mmss(session.remainingSec)}
           </p>
           <Badge tone="brand">● Gravando</Badge>
+          {!wake.supported && (
+            <p className="text-sm text-streak">Este navegador não mantém a tela ligada sozinho: toque na tela de vez em quando para ela não apagar.</p>
+          )}
           {session.currentCard && (
             <section aria-label="Carta do cliente" aria-live="assertive" className="flex flex-col gap-3 rounded-card border-2 border-brand bg-raised p-4 glow">
               <p className="text-xs font-bold tracking-wide text-muted uppercase">

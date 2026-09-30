@@ -5,7 +5,9 @@ import { asyncMutationOf, scenarioOf } from '@/test/simulationMocks'
 vi.mock('@/lib/supabase', () => ({ supabase: {} }))
 vi.mock('./hooks')
 vi.mock('./useTrainingSession')
+vi.mock('@/lib/useWakeLock', () => ({ useWakeLock: vi.fn(() => ({ supported: true })) }))
 
+import { useWakeLock } from '@/lib/useWakeLock'
 import * as sim from './hooks'
 import { SoloTraining } from './SoloTraining'
 import { useTrainingSession, type TrainingCard, type TrainingSession } from './useTrainingSession'
@@ -93,4 +95,17 @@ test('cada carta mostrada é registrada com o segundo em que apareceu (RF-76f)',
   const opts = vi.mocked(useTrainingSession).mock.calls[0][0]
   opts.onCardShown?.(card, 41)
   expect(shownMutate).toHaveBeenCalledWith({ simulationId: 's1', position: 0, atSec: 41 })
+})
+
+test('a tela fica ligada só enquanto grava (PRD §10)', () => {
+  setup(session())
+  expect(useWakeLock).toHaveBeenLastCalledWith(false)
+  setup(session({ phase: 'recording' }))
+  expect(useWakeLock).toHaveBeenLastCalledWith(true)
+})
+
+test('gravando em navegador sem Wake Lock: avisa para tocar na tela', () => {
+  vi.mocked(useWakeLock).mockReturnValue({ supported: false })
+  setup(session({ phase: 'recording' }))
+  expect(screen.getByText(/não mantém a tela ligada sozinho/)).toBeVisible()
 })
