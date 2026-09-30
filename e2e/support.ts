@@ -50,11 +50,15 @@ export async function resetJournal(): Promise<void> {
   if (r.error) throw r.error
 }
 
-export async function signIn(page: Page, email: string): Promise<void> {
+/** Origem do build de produção servido pelo `vite preview` (specs *.preview.spec.ts). */
+export const PREVIEW_URL = 'http://localhost:4273'
+
+/** Entra por magic link. `base` = origem do app: 5173 no dev server, PREVIEW_URL no build de produção. */
+export async function signIn(page: Page, email: string, base = 'http://localhost:5173'): Promise<void> {
   const { data, error } = await admin.auth.admin.generateLink({
-    type: 'magiclink', email, options: { redirectTo: 'http://localhost:5173/' },
+    type: 'magiclink', email, options: { redirectTo: `${base}/` },
   })
   if (error) throw error
   await page.goto(data.properties.action_link)
-  await page.waitForURL(/^http:\/\/localhost:5173\//)
+  await page.waitForURL((url) => url.origin === base)
 }
