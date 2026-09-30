@@ -1,11 +1,11 @@
 export type Result = { data: unknown; error: unknown; count?: number | null }
 export interface Call { table: string; method: string; args: unknown[] }
 
-const BUILDER_METHODS = ['select', 'insert', 'update', 'upsert', 'delete', 'eq', 'neq', 'in', 'is', 'order', 'limit', 'maybeSingle', 'single']
+const BUILDER_METHODS = ['select', 'insert', 'update', 'upsert', 'delete', 'eq', 'neq', 'in', 'is', 'order', 'limit', 'textSearch', 'maybeSingle', 'single']
 
 /**
  * Supabase falso para testes de hooks. Cada `await` de uma consulta consome o próximo item de
- * `results[<tabela>]` (ou `results['rpc:<função>']`, `results['storage:upload']`, `results['storage:signed']`);
+ * `results[<tabela>]` (ou `results['rpc:<função>']`, `results['storage:upload']`, `results['storage:signed']`, `results['storage:remove']`);
  * sem item, devolve `{ data: [], error: null }`. Toda chamada encadeada fica registrada em `calls`.
  */
 export function createFakeSupabase() {
@@ -26,14 +26,22 @@ export function createFakeSupabase() {
     calls.push({ table: `rpc:${fn}`, method: 'rpc', args: [args] })
     return next(`rpc:${fn}`, { data: null, error: null })
   })
-  const upload = vi.fn(async (path: string, _blob: Blob, options: unknown) => {
-    calls.push({ table: 'storage:recordings', method: 'upload', args: [path, options] })
-    return next('storage:upload', { data: { path }, error: null })
+  const bucketApi = (bucket: string) => ({
+    upload: vi.fn(async (path: string, _blob: Blob, options: unknown) => {
+      calls.push({ table: `storage:${bucket}`, method: 'upload', args: [path, options] })
+      return next('storage:upload', { data: { path }, error: null })
+    }),
+    createSignedUrl: vi.fn(async (path: string, seconds: number) => {
+      calls.push({ table: `storage:${bucket}`, method: 'createSignedUrl', args: [path, seconds] })
+      return next('storage:signed', { data: { signedUrl: `https://signed.test/${path}` }, error: null })
+    }),
+    remove: vi.fn(async (paths: string[]) => {
+      calls.push({ table: `storage:${bucket}`, method: 'remove', args: [paths] })
+      return next('storage:remove', { data: [], error: null })
+    }),
   })
-  const createSignedUrl = vi.fn(async (path: string) =>
-    next('storage:signed', { data: { signedUrl: `https://signed.test/${path}` }, error: null }))
   const getSession = vi.fn().mockResolvedValue({ data: { session: { user: { id: 'me' } } } })
-  const storage = { from: vi.fn(() => ({ upload, createSignedUrl })) }
+  const storage = { from: vi.fn((bucket: string) => bucketApi(bucket)) }
 
   return {
     supabase: { from, rpc, storage, auth: { getSession } },
