@@ -8268,3 +8268,3878 @@ git commit -m "feat(simulations): simulations routes, nav tab and surprise-flow 
 ## Após a Parte 4
 
 Com as Tasks 20–32 verdes, a E5 está concluída. Não entram nesta etapa (e ficam registrados): Wake Lock durante o treino e o job `pg_cron` que apaga áudios vencidos (**E8**); notificação "TRIIIM" (v2); E2E do treino com microfone falso do Chromium (`--use-fake-device-for-media-stream`), que pode ser acrescentado depois do go-live da E5. Próximo passo: detalhar **E6 — Caderno e Biblioteca** (nova "Parte 5"), reaproveitando `journal.ts`, `streak.ts`, `TextArea` e o padrão de hooks isolados.
+
+---
+
+# Parte 5 — Plano detalhado: E6 Caderno e Biblioteca
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Entregar o caderno diário obrigatório (3 campos, prazo até 12:00 do dia seguinte, marca de atraso, sempre visível ao mentor), as notas livres (privadas por padrão, Markdown simples, busca e salvamento automático), as checklists manuais, a biblioteca com upload de PDF só do mentor e o leitor que retoma a última página, fechando com um E2E "caderno do dia enviado → mentor vê".
+
+**Architecture:** As regras continuam puras em `src/domain` (`journalDays`, `markdown`, `notes`, `checklists`, `library`, mais `journal` e `streak` da Parte 2). O que precisa ser garantido fica no banco: `complete`, `late` e os horários do caderno (triggers da Parte 2), privacidade das notas (RLS), limites e coerência dos dados, pasta e tipo dos PDFs (uma migration nova com pgTAP). O acesso ao Supabase fica isolado em um módulo de hooks por área (`journal`, `notes`, `checklists`, `library`), com o contrato publicado primeiro (Task 33) para o W4 mockar; salvamento automático e Markdown seguro são utilitários compartilhados (`useAutosave`, `Markdown`).
+
+**Tech Stack:** o da Parte 1. Única dependência nova: `react-pdf@^11` (já prevista no Tech Stack; traz o PDF.js), instalada só na Task 39.
+
+**Spec:** `PRD.md` RF-42 (checklists manuais), §4.6 (RF-50–54), §4.7 (RF-60–65), §7 e §7.1.
+
+## Global Constraints (adicionais às Partes 1–4)
+
+- Telas só importam os hooks da própria área (`@/features/journal/hooks`, `notes`, `checklists`, `library`), nunca `@/lib/supabase`. Testes de tela começam com `vi.mock('@/lib/supabase', () => ({ supabase: {} }))` e `vi.mock('./hooks')` e usam as fábricas de `src/test/e6Mocks.ts`.
+- Rotas finais (as da Parte 3 já apontam para elas): `/caderno` (dia de hoje), `/caderno/dia/:date`, `/caderno/notas`, `/caderno/notas/nova?semana=<id>|livro=<id>|video=<id>|simulado=<id>`, `/caderno/notas/:id`, `/caderno/checklists`, `/biblioteca`, `/biblioteca/:bookId`.
+- Caderno (RF-50): cada campo com pelo menos 15 caracteres (`MIN_FIELD`); dia D aberto até 12:00 de D+1 em `America/Sao_Paulo`; `complete`, `late`, `created_at` e `updated_at` são do banco (o cliente nunca os envia); só a aluna escreve; o mentor lê tudo; ninguém apaga.
+- Notas (RF-52): privadas por padrão; o mentor só vê as com `private = false` (RLS); as notas do mentor são só dele (a aluna nunca as lê). Salvamento automático ~1 s depois da última alteração, com o indicador "Salvo" (RF-54).
+- Ids de notas, checklists e itens são gerados no cliente (`crypto.randomUUID()`): reenviar o mesmo salvamento nunca duplica nada.
+- Markdown das notas é desenhado como elementos React, nunca como HTML cru; só links `http(s)` e `mailto` viram link; links externos abrem com `rel="noopener noreferrer"`.
+- PDFs (RF-61/65): só o mentor envia ou remove; até 50 MB; só PDF; bucket privado; leitura por URL assinada de 1 h; cada envio usa um nome novo `<book_id>/<timestamp>.pdf` e o arquivo anterior só é apagado depois que o livro aponta para o novo. Só a aluna grava a página lida.
+- O leitor de PDF (PDF.js) carrega sob demanda (`lazy`), sem camadas de texto e de anotação; o worker vem do próprio `pdfjs-dist`.
+- Visual: só componentes e tokens de `src/design`; nenhum estilo novo. `font-display` só em títulos ≥ 20 px.
+- `package.json` só na Task 39. Migration só na Task 34 (`supabase/migrations/20260930000002_notes_library.sql`; se já existir uma migration com timestamp maior, use um timestamp maior que o último). `src/App.tsx`, `src/features/shell/AppShell.tsx`, `src/features/today/TodayScreen.tsx` (e o teste) e `e2e/support.ts` só na Task 43.
+
+## Review Focus
+
+1. **Fronteira do prazo do caderno:** o dia de ontem às 11:59 (SP) ainda é preenchível e vira "preenchido com atraso"; às 12:00 fica fechado, os campos ficam desabilitados, nada é salvo e o banco recusa com "O prazo deste dia já passou…"; o fuso do aparelho não muda isso. → domínio na Task 33, mapeamento do erro na Task 36, tela na Task 41 (e o pgTAP da Parte 2 continua valendo).
+2. **Nota privada vista pelo mentor:** uma nota privada da aluna não aparece para o mentor nem consultando a API; a compartilhada aparece como somente leitura; o mentor não edita nota alheia nem tem a opção de compartilhar. → pgTAP na Task 34 e telas na Task 42.
+3. **Perda de texto na edição:** sair da tela ou trocar de aba com alteração pendente salva na hora; respostas fora de ordem nunca sobrescrevem texto mais novo; salvar duas vezes (autosave, toque duplo) não cria duas notas. → Task 35, Task 36 (`upsert` por id) e Task 42.
+4. **PDF fora do combinado:** arquivo que não é PDF, acima de 50 MB, enviado pela aluna ou para uma pasta que não é de um livro é recusado (cliente e banco); trocar o PDF apaga o antigo sem deixar linha apontando para arquivo inexistente; PDF trocado por um menor abre na última página que existe. → Tasks 33, 34, 37, 39.
+5. **Script injetado por texto:** `<script>`, `<img onerror>` e `[x](javascript:…)` na nota aparecem como texto; `javascript:` no link externo do livro é recusado (cliente e banco). → Tasks 33, 34 e 35.
+
+## Ordem e paralelismo
+
+Só W3 e W4 (o W1 fica fora por limite de uso). O W3 faz contrato, banco, hooks e utilitários; o W4 faz todas as telas e o E2E.
+
+| Passo | Task | Dono | Depende de | Roda em paralelo com |
+|---|---|---|---|---|
+| 1 | 33 — Contrato de dados e domínio | **W3** | Tasks 1–32 | — |
+| 2 | 35 — `useAutosave`, `useDebounced` e `Markdown` | **W3** | 33 | 38, 39 |
+| 2 | 38 — ChecklistsScreen e ChecklistEditor | **W4** | 33 | 35 |
+| 2 | 39 — PdfReader (instala `react-pdf`) | **W4** | 33 | 35 |
+| 3 | 36 — Hooks do caderno, das notas e das checklists | **W3** | 33 | 34, 40, 41 |
+| 3 | 34 — Migration: notas, biblioteca e Storage | **W3** | 21 (migrations anteriores) | 36, 40, 41 |
+| 3 | 40 — LibraryScreen, BookScreen e BookAdmin | **W4** | 33, 39 | 34, 36 |
+| 3 | 41 — JournalScreen, JournalForm e MentorJournal | **W4** | 33, 35 | 34, 36 |
+| 4 | 37 — Hooks da biblioteca | **W3** | 33, 36 | 42 |
+| 4 | 42 — NotesScreen e NoteEditor | **W4** | 33, 35 | 37 |
+| 5 | 43 — Rotas, aba "Caderno", aviso da tela Hoje e E2E | **W4** | 34, 36–42 | — |
+
+**Arquivos compartilhados (evitar conflito):** `src/test/fakeSupabase.ts` só na Task 36; `src/features/*/hooks.ts` são do W3 (esqueletos na 33, implementação na 36 e na 37); as telas do W4 não editam nada do W3. `src/features/simulations/format.ts` (da E5) é só lido (`formatWhen`).
+
+**Contrato para mockar:** a partir da Task 33, o W4 escreve os testes de tela contra `vi.mock('./hooks')` e `src/test/e6Mocks.ts`, sem esperar as Tasks 36 e 37.
+
+## Estrutura de arquivos (criada nesta parte)
+
+```
+supabase/
+├── migrations/20260930000002_notes_library.sql        # T34
+└── tests/journal_notes_library.test.sql               # T34
+src/
+├── domain/
+│   ├── journalDays.ts, markdown.ts, notes.ts, checklists.ts, library.ts (+ .test.ts)   # T33
+├── lib/
+│   ├── useAutosave.ts, useDebounced.ts (+ teste)      # T35
+│   └── db.ts                                          # T36 (fail, myId)
+├── test/e6Mocks.ts                                    # T33
+├── features/
+│   ├── e6Contract.test.ts                             # T33
+│   ├── journal/   types.ts, hooks.ts (T33 esqueleto → T36), hooks.test.tsx (T36),
+│   │              JournalForm.tsx, MentorJournal.tsx, JournalScreen.tsx (+ testes) (T41), CadernoLayout.tsx (T43)
+│   ├── notes/     types.ts, hooks.ts (T33 → T36), Markdown.tsx (T35), NotesScreen.tsx, NoteEditor.tsx (T42)
+│   ├── checklists/ types.ts, hooks.ts (T33 → T36), ChecklistEditor.tsx, ChecklistsScreen.tsx (T38)
+│   └── library/   types.ts, hooks.ts (T33 → T37), pdfWorker.ts, PdfReader.tsx (T39),
+│                  BookAdmin.tsx, LibraryScreen.tsx, BookScreen.tsx (T40)
+└── App.tsx, features/shell/AppShell.tsx, features/today/TodayScreen.tsx   # T43
+e2e/journal.spec.ts, e2e/support.ts                    # T43
+```
+
+---
+
+### Task 33: Contrato de dados e domínio do caderno, das notas, das listas e da biblioteca — **[W3]**
+
+**Files:**
+- Create: `src/domain/journalDays.ts`, `src/domain/markdown.ts`, `src/domain/notes.ts`, `src/domain/checklists.ts`, `src/domain/library.ts`, `src/features/journal/types.ts`, `src/features/notes/types.ts`, `src/features/checklists/types.ts`, `src/features/library/types.ts`, `src/features/journal/hooks.ts`, `src/features/notes/hooks.ts`, `src/features/checklists/hooks.ts`, `src/features/library/hooks.ts` (esqueletos), `src/test/e6Mocks.ts`
+- Test: `src/domain/journalDays.test.ts`, `src/domain/markdown.test.ts`, `src/domain/notes.test.ts`, `src/domain/checklists.test.ts`, `src/domain/library.test.ts`, `src/features/e6Contract.test.ts`
+
+**Interfaces:**
+- Consumes: `writeWindow` (`@/domain/journal`); `spDate`, `addDays` (`@/lib/dates`); `NODES` (`@/content/trail`); `weekday` (`@/domain/routine`); `asyncMutationOf`, `queryOf`, `mutationOf` (`@/test/simulationMocks`).
+- Produces (**contrato usado por W3 e W4 — não renomear**):
+  - `journalDays.ts`: `DayStatus = 'done' | 'done_late' | 'open' | 'late_window' | 'missing' | 'future'`, `DayEntry { complete; late }`, `DAY_STATUS_LABEL`, `journalDayStatus(date, now, entry?)`, `lastDays(today, n)` (do mais novo ao mais antigo), `yesterdayNotice(completeDates, now): { kind: 'missing' | 'late_window'; date } | null`.
+  - `markdown.ts`: `Inline`, `Block`, `safeHref(raw)`, `parseInline(s)`, `parseMarkdown(src)`.
+  - `notes.ts`: `NoteLinkType`, `NoteLink { type; id }`, `noteLinkFromParams(URLSearchParams)`, `noteLinkLabel(link)`, `noteLinkPath(link)`, `snippet(body, max?)`.
+  - `checklists.ts`: `ChecklistDraft`, `validateChecklistDraft(draft): string | null`, `checklistProgress(items)`.
+  - `library.ts`: `MAX_PDF_BYTES`, `validatePdfFile(file): string | null`, `bookFilePath(bookId, stamp)`, `normalizeExternalUrl(raw): string | null`, `clampPage(page, total)`, `phaseLabel(phase)`.
+  - Tipos por área em `types.ts`: `JournalEntry`, `SaveJournalVars`; `Note`, `SaveNoteVars`; `Checklist`, `ChecklistItem`, `SaveChecklistVars`, `ToggleChecklistItemVars`; `Book`, `BookProgress`, `SaveProgressVars`, `UploadBookVars`, `RemoveBookFileVars`, `SaveBookLinkVars`.
+  - Cada `hooks.ts` exporta **exatamente**: `journal`: `useJournalEntries(): UseQueryResult<JournalEntry[]>`, `useSaveJournalEntry(): UseMutationResult<JournalEntry, Error, SaveJournalVars>`; `notes`: `useNotes(search: string): UseQueryResult<Note[]>`, `useNote(id: string | undefined): UseQueryResult<Note | null>`, `useSaveNote(): UseMutationResult<void, Error, SaveNoteVars>`, `useDeleteNote(): UseMutationResult<void, Error, string>`; `checklists`: `useChecklists(): UseQueryResult<Checklist[]>`, `useSaveChecklist(): UseMutationResult<void, Error, SaveChecklistVars>`, `useToggleChecklistItem(): UseMutationResult<void, Error, ToggleChecklistItemVars>`, `useDeleteChecklist(): UseMutationResult<void, Error, string>`; `library`: `useBooks(): UseQueryResult<Book[]>` (cada livro com a página lida em `progress`), `useBookUrl(filePath: string | null): UseQueryResult<string>`, `useSaveBookProgress(): UseMutationResult<void, Error, SaveProgressVars>`, `useUploadBook(): UseMutationResult<void, Error, UploadBookVars>`, `useRemoveBookFile(): UseMutationResult<void, Error, RemoveBookFileVars>`, `useSaveBookLink(): UseMutationResult<void, Error, SaveBookLinkVars>`.
+  - `src/test/e6Mocks.ts`: `entryOf`, `noteOf`, `checklistOf`, `bookOf`, `courseOf` (todos aceitam `Partial<…>`), e re-exporta `queryOf`, `mutationOf`, `asyncMutationOf`.
+- O `journal_days` usado por `useJournalDays` (streak e tela Hoje) é invalidado pela Task 36 depois de cada gravação do caderno.
+
+- [ ] **Step 1: Testes do domínio**
+
+
+`src/domain/journalDays.test.ts`:
+```ts
+import { DAY_STATUS_LABEL, journalDayStatus, lastDays, yesterdayNotice } from './journalDays'
+
+const at = (iso: string) => new Date(iso)
+// 30/09 às 11:59 em SP = 14:59Z; ao meio-dia = 15:00Z
+const NOON_MINUS = at('2026-09-30T14:59:00Z')
+const NOON = at('2026-09-30T15:00:00Z')
+
+test('fronteira das 12:00 de São Paulo (Review Focus 1)', () => {
+  expect(journalDayStatus('2026-09-29', NOON_MINUS, undefined)).toBe('late_window')
+  expect(journalDayStatus('2026-09-29', NOON, undefined)).toBe('missing')
+})
+
+test('o fuso do aparelho não muda o resultado: 02:59Z do dia 30 ainda é 29 em SP', () => {
+  expect(journalDayStatus('2026-09-29', at('2026-09-30T02:59:00Z'), undefined)).toBe('open')
+})
+
+test('entrada completa: no prazo ou com atraso, mesmo depois de fechado', () => {
+  expect(journalDayStatus('2026-09-29', NOON, { complete: true, late: false })).toBe('done')
+  expect(journalDayStatus('2026-09-29', NOON, { complete: true, late: true })).toBe('done_late')
+})
+
+test('rascunho incompleto continua pendente até fechar', () => {
+  expect(journalDayStatus('2026-09-30', NOON, { complete: false, late: false })).toBe('open')
+  expect(journalDayStatus('2026-09-27', NOON, { complete: false, late: false })).toBe('missing')
+})
+
+test('dia futuro', () => {
+  expect(journalDayStatus('2026-10-01', NOON, undefined)).toBe('future')
+  expect(DAY_STATUS_LABEL.missing).toBe('Em falta')
+})
+
+test('últimos dias, do mais novo ao mais antigo', () => {
+  expect(lastDays('2026-10-01', 3)).toEqual(['2026-10-01', '2026-09-30', '2026-09-29'])
+})
+
+test('aviso de ontem na tela Hoje', () => {
+  expect(yesterdayNotice(new Set(), NOON)).toEqual({ kind: 'missing', date: '2026-09-29' })
+  expect(yesterdayNotice(new Set(), NOON_MINUS)).toEqual({ kind: 'late_window', date: '2026-09-29' })
+  expect(yesterdayNotice(new Set(['2026-09-29']), NOON)).toBeNull()
+})
+```
+
+`src/domain/markdown.test.ts`:
+```ts
+import { parseInline, parseMarkdown, safeHref } from './markdown'
+
+test('parágrafos, títulos e listas', () => {
+  const b = parseMarkdown('# Título\n\nTexto **forte** e *leve*.\n\n- um\n- dois\n\n1. a\n2. b')
+  expect(b.map((x) => x.t)).toEqual(['h', 'p', 'ul', 'ol'])
+  expect(b[0]).toMatchObject({ t: 'h', level: 1 })
+  expect(b[2]).toMatchObject({ t: 'ul' })
+  expect((b[2] as { items: unknown[] }).items).toHaveLength(2)
+})
+
+test('negrito, itálico, código e link válido', () => {
+  expect(parseInline('a **b** *c* `d` [e](https://x.com)')).toEqual([
+    { t: 'text', v: 'a ' }, { t: 'strong', c: [{ t: 'text', v: 'b' }] }, { t: 'text', v: ' ' },
+    { t: 'em', c: [{ t: 'text', v: 'c' }] }, { t: 'text', v: ' ' }, { t: 'code', v: 'd' }, { t: 'text', v: ' ' },
+    { t: 'link', href: 'https://x.com', c: [{ t: 'text', v: 'e' }] },
+  ])
+})
+
+test('link perigoso vira texto (Review Focus 5)', () => {
+  expect(safeHref('javascript:alert(1)')).toBeNull()
+  expect(safeHref('data:text/html,<script>')).toBeNull()
+  expect(safeHref('HTTPS://ok.com')).toBe('HTTPS://ok.com')
+  expect(parseInline('[clique](javascript:alert(1))')).toEqual([{ t: 'text', v: '[clique](javascript:alert(1))' }])
+})
+
+test('HTML cru nunca vira marcação: fica como texto', () => {
+  expect(parseMarkdown('<script>alert(1)</script>')).toEqual([{ t: 'p', c: [{ t: 'text', v: '<script>alert(1)</script>' }] }])
+  expect(parseInline('<img src=x onerror=alert(1)>')).toEqual([{ t: 'text', v: '<img src=x onerror=alert(1)>' }])
+})
+
+test('marcações abertas e vazias não quebram nem sobem texto', () => {
+  expect(parseInline('2 * 3 e **aberto')).toEqual([{ t: 'text', v: '2 * 3 e **aberto' }])
+  expect(parseInline('snake_case_word')).toEqual([{ t: 'text', v: 'snake_case_word' }])
+  expect(parseMarkdown('')).toEqual([])
+})
+
+test('quebra de linha dentro do parágrafo é mantida; CRLF é aceito', () => {
+  expect(parseMarkdown('linha 1\r\nlinha 2')).toEqual([{ t: 'p', c: [{ t: 'text', v: 'linha 1\nlinha 2' }] }])
+})
+```
+
+`src/domain/notes.test.ts`:
+```ts
+import { noteLinkFromParams, noteLinkLabel, noteLinkPath, snippet } from './notes'
+
+const p = (q: string) => new URLSearchParams(q)
+
+test('vínculo vem dos parâmetros da rota', () => {
+  expect(noteLinkFromParams(p('semana=w05'))).toEqual({ type: 'week', id: 'w05' })
+  expect(noteLinkFromParams(p('livro=carnegie'))).toEqual({ type: 'book', id: 'carnegie' })
+  expect(noteLinkFromParams(p('simulado=11111111-1111-1111-1111-111111111111'))).toMatchObject({ type: 'simulation' })
+  expect(noteLinkFromParams(p('video=w01.video.1'))).toEqual({ type: 'video', id: 'w01.video.1' })
+})
+
+test('parâmetro inválido é ignorado (semana inexistente, id malformado)', () => {
+  expect(noteLinkFromParams(p('semana=w99'))).toBeNull()
+  expect(noteLinkFromParams(p('livro=../etc'))).toBeNull()
+  expect(noteLinkFromParams(p('video=w01.reading'))).toBeNull()
+  expect(noteLinkFromParams(p(''))).toBeNull()
+})
+
+test('rótulos e rotas do vínculo', () => {
+  expect(noteLinkLabel({ type: 'week', id: 'w05' })).toBe('Semana 5')
+  expect(noteLinkLabel({ type: 'book', id: 'carnegie' })).toBe('Livro')
+  expect(noteLinkPath({ type: 'week', id: 'w05' })).toBe('/trilha/w05')
+  expect(noteLinkPath({ type: 'book', id: 'carnegie' })).toBe('/biblioteca/carnegie')
+})
+
+test('resumo tira marcações e corta com reticências', () => {
+  expect(snippet('# Título\n\n**forte** texto')).toBe('Título forte texto')
+  expect(snippet('x'.repeat(200), 10)).toBe('xxxxxxxxxx…')
+})
+```
+
+`src/domain/checklists.test.ts`:
+```ts
+import { checklistProgress, validateChecklistDraft, type ChecklistDraft } from './checklists'
+
+const ok: ChecklistDraft = { title: 'Semana 5', weekId: 'w05', dueDate: '2026-10-04', items: [{ text: 'Ligar para 5 empresas' }] }
+
+test('lista válida', () => expect(validateChecklistDraft(ok)).toBeNull())
+
+test('título, itens e limites (RF-42)', () => {
+  expect(validateChecklistDraft({ ...ok, title: '  ' })).toMatch(/título/)
+  expect(validateChecklistDraft({ ...ok, title: 'x'.repeat(121) })).toMatch(/120/)
+  expect(validateChecklistDraft({ ...ok, items: [] })).toMatch(/pelo menos um item/)
+  expect(validateChecklistDraft({ ...ok, items: [{ text: 'a' }, { text: ' ' }] })).toMatch(/em branco/)
+  expect(validateChecklistDraft({ ...ok, items: [{ text: 'x'.repeat(301) }] })).toMatch(/300/)
+})
+
+test('semana e data são opcionais, mas se vierem precisam ser válidas', () => {
+  expect(validateChecklistDraft({ ...ok, weekId: null, dueDate: null })).toBeNull()
+  expect(validateChecklistDraft({ ...ok, weekId: 'w99' })).toMatch(/Semana/)
+  expect(validateChecklistDraft({ ...ok, weekId: 'f4-marca' })).toMatch(/Semana/)
+  expect(validateChecklistDraft({ ...ok, dueDate: '2026-02-30' })).toMatch(/Data/)
+})
+
+test('progresso', () => {
+  expect(checklistProgress([])).toEqual({ done: 0, total: 0, ratio: 0 })
+  expect(checklistProgress([{ done: true }, { done: false }])).toEqual({ done: 1, total: 2, ratio: 0.5 })
+})
+```
+
+`src/domain/library.test.ts`:
+```ts
+import { bookFilePath, clampPage, MAX_PDF_BYTES, normalizeExternalUrl, phaseLabel, validatePdfFile } from './library'
+
+test('só PDF de até 50 MB (RF-61)', () => {
+  expect(validatePdfFile({ name: 'a.pdf', size: 1000, type: 'application/pdf' })).toBeNull()
+  expect(validatePdfFile({ name: 'a.pdf', size: 1000, type: '' })).toBeNull()
+  expect(validatePdfFile({ name: 'a.exe', size: 1000, type: 'application/x-msdownload' })).toMatch(/PDF/)
+  expect(validatePdfFile({ name: 'a.png', size: 1000, type: '' })).toMatch(/PDF/)
+  expect(validatePdfFile({ name: 'a.pdf', size: 0, type: 'application/pdf' })).toMatch(/vazio/)
+  expect(validatePdfFile({ name: 'a.pdf', size: MAX_PDF_BYTES, type: 'application/pdf' })).toBeNull()
+  expect(validatePdfFile({ name: 'a.pdf', size: MAX_PDF_BYTES + 1, type: 'application/pdf' })).toMatch(/50 MB/)
+})
+
+test('caminho do arquivo fica na pasta do livro', () => {
+  expect(bookFilePath('carnegie', 1730000000000)).toBe('carnegie/1730000000000.pdf')
+})
+
+test('link externo só http(s)', () => {
+  expect(normalizeExternalUrl(' https://exemplo.com/livro ')).toBe('https://exemplo.com/livro')
+  expect(normalizeExternalUrl('javascript:alert(1)')).toBeNull()
+  expect(normalizeExternalUrl('exemplo.com')).toBeNull()
+  expect(normalizeExternalUrl('')).toBeNull()
+})
+
+test('página de retomada nunca sai do intervalo do PDF (Review Focus 4)', () => {
+  expect(clampPage(12, 200)).toBe(12)
+  expect(clampPage(500, 200)).toBe(200)
+  expect(clampPage(0, 200)).toBe(1)
+  expect(clampPage(-3, null)).toBe(1)
+  expect(clampPage(Number.NaN, 10)).toBe(1)
+  expect(clampPage(7.9, null)).toBe(7)
+})
+
+test('rótulo de fase da biblioteca', () => {
+  expect(phaseLabel('1')).toBe('Fase 1')
+  expect(phaseLabel('2-3')).toBe('Fases 2 e 3')
+  expect(phaseLabel('1-3')).toBe('Fases 1 a 3')
+})
+```
+
+
+- [ ] **Step 2: Teste do contrato dos hooks**
+
+
+`src/features/e6Contract.test.ts`:
+```ts
+vi.mock('@/lib/supabase', () => ({ supabase: {} }))
+
+test('os módulos de hooks do caderno, das notas, das listas e da biblioteca exportam exatamente o contrato combinado', async () => {
+  expect(Object.keys(await import('./journal/hooks')).sort()).toEqual(['useJournalEntries', 'useSaveJournalEntry'])
+  expect(Object.keys(await import('./notes/hooks')).sort()).toEqual(['useDeleteNote', 'useNote', 'useNotes', 'useSaveNote'])
+  expect(Object.keys(await import('./checklists/hooks')).sort()).toEqual(['useChecklists', 'useDeleteChecklist', 'useSaveChecklist', 'useToggleChecklistItem'])
+  expect(Object.keys(await import('./library/hooks')).sort()).toEqual(['useBookUrl', 'useBooks', 'useRemoveBookFile', 'useSaveBookLink', 'useSaveBookProgress', 'useUploadBook'])
+})
+```
+
+
+- [ ] **Step 3: Rodar e ver falhar**
+
+Run: `npx vitest run src/domain/journalDays.test.ts src/domain/markdown.test.ts src/domain/notes.test.ts src/domain/checklists.test.ts src/domain/library.test.ts src/features/e6Contract.test.ts 2>&1 | tail -15`
+Expected: FAIL — `Failed to resolve import "./journalDays"` (e os demais módulos ainda inexistentes).
+
+- [ ] **Step 4: Implementar o domínio**
+
+
+`src/domain/journalDays.ts`:
+```ts
+import { addDays, spDate } from '@/lib/dates'
+import { writeWindow } from './journal'
+
+export type DayStatus = 'done' | 'done_late' | 'open' | 'late_window' | 'missing' | 'future'
+export interface DayEntry { complete: boolean; late: boolean }
+
+export const DAY_STATUS_LABEL: Record<DayStatus, string> = {
+  done: 'Completo',
+  done_late: 'Preenchido com atraso',
+  open: 'Pendente',
+  late_window: 'Ainda dá para preencher, até 12:00',
+  missing: 'Em falta',
+  future: '',
+}
+
+/** RF-50: situação de um dia do caderno. O dia D fica aberto até 12:00 (SP) de D+1; depois disso, sem entrada completa, está "em falta". */
+export function journalDayStatus(date: string, now: Date, entry: DayEntry | undefined): DayStatus {
+  if (date > spDate(now)) return 'future'
+  if (entry?.complete) return entry.late ? 'done_late' : 'done'
+  const w = writeWindow(date, now)
+  return w === 'on_time' ? 'open' : w === 'late' ? 'late_window' : 'missing'
+}
+
+/** Hoje e os `n - 1` dias anteriores, do mais novo para o mais antigo. */
+export function lastDays(today: string, n: number): string[] {
+  return Array.from({ length: n }, (_, i) => addDays(today, -i))
+}
+
+/** Aviso da tela Hoje: o caderno de ontem em falta (ou ainda dentro do prazo até 12:00). */
+export function yesterdayNotice(completeDates: ReadonlySet<string>, now: Date): { kind: 'missing' | 'late_window'; date: string } | null {
+  const date = addDays(spDate(now), -1)
+  const status = journalDayStatus(date, now, completeDates.has(date) ? { complete: true, late: false } : undefined)
+  return status === 'missing' || status === 'late_window' ? { kind: status, date } : null
+}
+```
+
+`src/domain/markdown.ts`:
+```ts
+export type Inline =
+  | { t: 'text'; v: string }
+  | { t: 'strong'; c: Inline[] }
+  | { t: 'em'; c: Inline[] }
+  | { t: 'code'; v: string }
+  | { t: 'link'; href: string; c: Inline[] }
+
+export type Block =
+  | { t: 'p'; c: Inline[] }
+  | { t: 'h'; level: 1 | 2 | 3; c: Inline[] }
+  | { t: 'ul'; items: Inline[][] }
+  | { t: 'ol'; items: Inline[][] }
+
+/** Só http(s) e mailto viram link; qualquer outra coisa (javascript:, data:…) fica como texto. */
+export function safeHref(raw: string): string | null {
+  return /^(https?:\/\/|mailto:)/i.test(raw) ? raw : null
+}
+
+export function parseInline(s: string): Inline[] {
+  const out: Inline[] = []
+  let buf = ''
+  let i = 0
+  const flush = () => { if (buf) { out.push({ t: 'text', v: buf }); buf = '' } }
+  while (i < s.length) {
+    if (s.startsWith('**', i)) {
+      const j = s.indexOf('**', i + 2)
+      if (j > i + 2) { flush(); out.push({ t: 'strong', c: parseInline(s.slice(i + 2, j)) }); i = j + 2; continue }
+    }
+    const ch = s[i]
+    if (ch === '*' && s[i + 1] !== ' ') {
+      const j = s.indexOf('*', i + 1)
+      if (j > i + 1) { flush(); out.push({ t: 'em', c: parseInline(s.slice(i + 1, j)) }); i = j + 1; continue }
+    }
+    if (ch === '`') {
+      const j = s.indexOf('`', i + 1)
+      if (j > i + 1) { flush(); out.push({ t: 'code', v: s.slice(i + 1, j) }); i = j + 1; continue }
+    }
+    if (ch === '[') {
+      const m = /^\[([^\]]+)\]\(([^)\s]+)\)/.exec(s.slice(i))
+      if (m) {
+        const href = safeHref(m[2])
+        if (href) { flush(); out.push({ t: 'link', href, c: parseInline(m[1]) }) } else buf += m[0]
+        i += m[0].length
+        continue
+      }
+    }
+    buf += ch
+    i++
+  }
+  flush()
+  return out
+}
+
+/** Markdown simples (RF-51): parágrafos, títulos `#`–`###`, listas `-`/`*` e `1.`, **negrito**, *itálico*, `código` e [links](https://…). Nada de HTML. */
+export function parseMarkdown(src: string): Block[] {
+  const blocks: Block[] = []
+  let para: string[] = []
+  let list: { kind: 'ul' | 'ol'; items: string[] } | null = null
+  const flushPara = () => { if (para.length) { blocks.push({ t: 'p', c: parseInline(para.join('\n')) }); para = [] } }
+  const flushList = () => { if (list) { blocks.push({ t: list.kind, items: list.items.map(parseInline) }); list = null } }
+
+  for (const line of src.replace(/\r\n?/g, '\n').split('\n')) {
+    const heading = /^(#{1,3})\s+(.+)$/.exec(line)
+    const bullet = /^\s*[-*]\s+(.+)$/.exec(line)
+    const numbered = /^\s*\d+\.\s+(.+)$/.exec(line)
+    if (line.trim() === '') { flushPara(); flushList(); continue }
+    if (heading) { flushPara(); flushList(); blocks.push({ t: 'h', level: heading[1].length as 1 | 2 | 3, c: parseInline(heading[2]) }); continue }
+    const item = bullet ?? numbered
+    if (item) {
+      flushPara()
+      const kind = bullet ? 'ul' : 'ol'
+      if (list && list.kind !== kind) flushList()
+      list ??= { kind, items: [] }
+      list.items.push(item[1])
+      continue
+    }
+    flushList()
+    para.push(line)
+  }
+  flushPara()
+  flushList()
+  return blocks
+}
+```
+
+`src/domain/notes.ts`:
+```ts
+import { NODES } from '@/content/trail'
+
+export type NoteLinkType = 'week' | 'video' | 'book' | 'simulation'
+export interface NoteLink { type: NoteLinkType; id: string }
+
+const PARAM: Record<NoteLinkType, string> = { week: 'semana', video: 'video', book: 'livro', simulation: 'simulado' }
+const VALID_ID: Record<NoteLinkType, (id: string) => boolean> = {
+  week: (id) => NODES.some((n) => n.id === id && n.week !== undefined),
+  video: (id) => NODES.some((n) => n.items.some((i) => i.id === id && i.kind === 'video')),
+  book: (id) => /^[a-z0-9-]{1,40}$/.test(id),
+  simulation: (id) => /^[0-9a-f-]{36}$/i.test(id),
+}
+
+/** `/caderno/notas/nova?semana=w05` → vínculo da nota. Parâmetro desconhecido ou inválido é ignorado. */
+export function noteLinkFromParams(p: URLSearchParams): NoteLink | null {
+  for (const type of Object.keys(PARAM) as NoteLinkType[]) {
+    const id = p.get(PARAM[type])
+    if (id && VALID_ID[type](id)) return { type, id }
+  }
+  return null
+}
+
+export function noteLinkLabel(l: NoteLink): string {
+  if (l.type === 'week') {
+    const n = NODES.find((x) => x.id === l.id)
+    return n?.week !== undefined ? `Semana ${n.week}` : (n?.title ?? 'Semana')
+  }
+  return { video: 'Vídeo', book: 'Livro', simulation: 'Simulado' }[l.type]
+}
+
+/** Rota que o vínculo abre. */
+export function noteLinkPath(l: NoteLink): string {
+  return { week: `/trilha/${l.id}`, video: '/trilha', book: `/biblioteca/${l.id}`, simulation: `/simulados/${l.id}` }[l.type]
+}
+
+/** Resumo de uma linha para as listas. */
+export function snippet(body: string, max = 120): string {
+  const flat = body.replace(/[#*`>]/g, '').replace(/\s+/g, ' ').trim()
+  return flat.length > max ? `${flat.slice(0, max).trimEnd()}…` : flat
+}
+```
+
+`src/domain/checklists.ts`:
+```ts
+import { NODES } from '@/content/trail'
+import { weekday } from './routine'
+
+export interface ChecklistDraft { title: string; weekId: string | null; dueDate: string | null; items: { text: string }[] }
+
+const validDate = (iso: string): boolean => {
+  try { weekday(iso); return true } catch { return false }
+}
+
+/** RF-42: título, itens, semana e data opcionais. Devolve a mensagem de erro em pt-BR ou `null`. Limites iguais aos do banco. */
+export function validateChecklistDraft(d: ChecklistDraft): string | null {
+  const title = d.title.trim()
+  if (title === '') return 'Dê um título para a lista.'
+  if (title.length > 120) return 'O título pode ter no máximo 120 caracteres.'
+  const items = d.items.map((i) => i.text.trim())
+  if (items.length === 0 || items.every((t) => t === '')) return 'Acrescente pelo menos um item.'
+  if (items.some((t) => t === '')) return 'Há itens em branco: preencha ou remova.'
+  if (items.some((t) => t.length > 300)) return 'Cada item pode ter no máximo 300 caracteres.'
+  if (d.weekId !== null && !NODES.some((n) => n.id === d.weekId && n.week !== undefined)) return 'Semana inválida.'
+  if (d.dueDate !== null && !validDate(d.dueDate)) return 'Data inválida.'
+  return null
+}
+
+export function checklistProgress(items: { done: boolean }[]): { done: number; total: number; ratio: number } {
+  const done = items.filter((i) => i.done).length
+  return { done, total: items.length, ratio: items.length === 0 ? 0 : done / items.length }
+}
+```
+
+`src/domain/library.ts`:
+```ts
+export const MAX_PDF_BYTES = 50 * 1024 * 1024
+
+/** RF-61: só PDF, até 50 MB. Alguns navegadores entregam `type` vazio; nesse caso vale a extensão. */
+export function validatePdfFile(f: { name: string; size: number; type: string }): string | null {
+  const isPdf = f.type === 'application/pdf' || (f.type === '' && /\.pdf$/i.test(f.name))
+  if (!isPdf) return 'Envie um arquivo PDF.'
+  if (f.size <= 0) return 'O arquivo está vazio.'
+  if (f.size > MAX_PDF_BYTES) return 'O PDF pode ter no máximo 50 MB.'
+  return null
+}
+
+/** Caminho no bucket `books`: sempre dentro da pasta do livro; nome único para nunca sobrescrever. */
+export const bookFilePath = (bookId: string, stamp: number): string => `${bookId}/${stamp}.pdf`
+
+/** RF-62: link externo (compra ou audiolivro). Devolve a URL normalizada ou `null` se não for http(s). */
+export function normalizeExternalUrl(raw: string): string | null {
+  try {
+    const u = new URL(raw.trim())
+    return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : null
+  } catch {
+    return null
+  }
+}
+
+/** RF-63: página segura para abrir o leitor (o PDF pode ter sido trocado por um menor). */
+export function clampPage(page: number, total: number | null): number {
+  const p = Number.isFinite(page) ? Math.floor(page) : 1
+  const min = Math.max(1, p)
+  return total !== null && total >= 1 ? Math.min(min, total) : min
+}
+
+/** '1' → "Fase 1"; '2-3' → "Fases 2 e 3"; '1-3' → "Fases 1 a 3". */
+export function phaseLabel(phase: string): string {
+  const m = /^(\d)-(\d)$/.exec(phase)
+  if (!m) return `Fase ${phase}`
+  return Number(m[2]) === Number(m[1]) + 1 ? `Fases ${m[1]} e ${m[2]}` : `Fases ${m[1]} a ${m[2]}`
+}
+```
+
+
+- [ ] **Step 5: Tipos, esqueletos dos hooks e mocks de teste**
+
+
+`src/features/journal/types.ts`:
+```ts
+export interface JournalEntry {
+  date: string
+  learned: string
+  practiced: string
+  tomorrow: string
+  /** `complete`, `late`, `createdAt` e `updatedAt` são definidos pelo banco (RF-50). */
+  complete: boolean
+  late: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export interface SaveJournalVars { date: string; learned: string; practiced: string; tomorrow: string }
+```
+
+`src/features/notes/types.ts`:
+```ts
+import type { NoteLink } from '@/domain/notes'
+
+export interface Note {
+  id: string
+  title: string
+  body: string
+  /** Padrão `true`: o mentor só vê notas com `private = false` (RF-52, garantido pelo RLS). */
+  private: boolean
+  link: NoteLink | null
+  updatedAt: string
+  /** A nota é de quem está logado (só o autor edita e apaga). */
+  mine: boolean
+}
+
+/** `id` é gerado no cliente (`crypto.randomUUID()`), então salvar de novo nunca cria uma segunda nota. */
+export interface SaveNoteVars { id: string; title: string; body: string; private: boolean; link: NoteLink | null }
+```
+
+`src/features/checklists/types.ts`:
+```ts
+export interface ChecklistItem { id: string; text: string; done: boolean; position: number }
+
+export interface Checklist {
+  id: string
+  title: string
+  weekId: string | null
+  dueDate: string | null
+  createdAt: string
+  /** A lista é de quem está logado; a outra pessoa só lê (RLS). */
+  mine: boolean
+  items: ChecklistItem[]
+}
+
+/** Os ids da lista e dos itens são gerados no cliente, então repetir o envio é idempotente. */
+export interface SaveChecklistVars { id: string; title: string; weekId: string | null; dueDate: string | null; items: { id: string; text: string }[] }
+export interface ToggleChecklistItemVars { itemId: string; done: boolean }
+```
+
+`src/features/library/types.ts`:
+```ts
+export interface BookProgress { page: number; totalPages: number | null; updatedAt: string }
+
+export interface Book {
+  id: string
+  order: number
+  title: string
+  author: string | null
+  phase: string
+  kind: 'livro' | 'curso'
+  /** Caminho no bucket privado `books` (`<id>/<timestamp>.pdf`); `null` = "PDF ainda não disponível". */
+  filePath: string | null
+  externalUrl: string | null
+  /** Última página lida (só a aluna grava). */
+  progress: BookProgress | null
+}
+
+export interface SaveProgressVars { bookId: string; page: number; totalPages: number | null }
+export interface UploadBookVars { bookId: string; file: File; previousPath: string | null }
+export interface RemoveBookFileVars { bookId: string; filePath: string }
+export interface SaveBookLinkVars { bookId: string; externalUrl: string | null }
+```
+
+
+Esqueletos dos hooks (as Tasks 36 e 37 trocam os corpos, sem mudar nomes nem tipos):
+
+`src/features/journal/hooks.ts`:
+```ts
+import type { UseMutationResult, UseQueryResult } from '@tanstack/react-query'
+import type { JournalEntry, SaveJournalVars } from './types'
+
+function notYet(name: string): never {
+  throw new Error(`${name}: implementado na Task 36`)
+}
+
+export function useJournalEntries(): UseQueryResult<JournalEntry[]> { return notYet('useJournalEntries') }
+export function useSaveJournalEntry(): UseMutationResult<JournalEntry, Error, SaveJournalVars> { return notYet('useSaveJournalEntry') }
+```
+
+`src/features/notes/hooks.ts`:
+```ts
+import type { UseMutationResult, UseQueryResult } from '@tanstack/react-query'
+import type { Note, SaveNoteVars } from './types'
+
+function notYet(name: string): never {
+  throw new Error(`${name}: implementado na Task 36`)
+}
+
+export function useNotes(search: string): UseQueryResult<Note[]> { return notYet(`useNotes(${search})`) }
+export function useNote(id: string | undefined): UseQueryResult<Note | null> { return notYet(`useNote(${id})`) }
+export function useSaveNote(): UseMutationResult<void, Error, SaveNoteVars> { return notYet('useSaveNote') }
+export function useDeleteNote(): UseMutationResult<void, Error, string> { return notYet('useDeleteNote') }
+```
+
+`src/features/checklists/hooks.ts`:
+```ts
+import type { UseMutationResult, UseQueryResult } from '@tanstack/react-query'
+import type { Checklist, SaveChecklistVars, ToggleChecklistItemVars } from './types'
+
+function notYet(name: string): never {
+  throw new Error(`${name}: implementado na Task 36`)
+}
+
+export function useChecklists(): UseQueryResult<Checklist[]> { return notYet('useChecklists') }
+export function useSaveChecklist(): UseMutationResult<void, Error, SaveChecklistVars> { return notYet('useSaveChecklist') }
+export function useToggleChecklistItem(): UseMutationResult<void, Error, ToggleChecklistItemVars> { return notYet('useToggleChecklistItem') }
+export function useDeleteChecklist(): UseMutationResult<void, Error, string> { return notYet('useDeleteChecklist') }
+```
+
+`src/features/library/hooks.ts`:
+```ts
+import type { UseMutationResult, UseQueryResult } from '@tanstack/react-query'
+import type { Book, RemoveBookFileVars, SaveBookLinkVars, SaveProgressVars, UploadBookVars } from './types'
+
+function notYet(name: string): never {
+  throw new Error(`${name}: implementado na Task 37`)
+}
+
+export function useBooks(): UseQueryResult<Book[]> { return notYet('useBooks') }
+export function useBookUrl(filePath: string | null): UseQueryResult<string> { return notYet(`useBookUrl(${filePath})`) }
+export function useSaveBookProgress(): UseMutationResult<void, Error, SaveProgressVars> { return notYet('useSaveBookProgress') }
+export function useUploadBook(): UseMutationResult<void, Error, UploadBookVars> { return notYet('useUploadBook') }
+export function useRemoveBookFile(): UseMutationResult<void, Error, RemoveBookFileVars> { return notYet('useRemoveBookFile') }
+export function useSaveBookLink(): UseMutationResult<void, Error, SaveBookLinkVars> { return notYet('useSaveBookLink') }
+```
+
+
+`src/test/e6Mocks.ts`:
+```ts
+import type { Book } from '@/features/library/types'
+import type { Checklist } from '@/features/checklists/types'
+import type { JournalEntry } from '@/features/journal/types'
+import type { Note } from '@/features/notes/types'
+
+export { asyncMutationOf, mutationOf, queryOf } from './simulationMocks'
+
+export function entryOf(over: Partial<JournalEntry> = {}): JournalEntry {
+  return {
+    date: '2026-09-29', learned: 'aprendi a ouvir o cliente', practiced: 'pratiquei o pitch de 30 s', tomorrow: 'ligar para 3 empresas',
+    complete: true, late: false, createdAt: '2026-09-29T22:10:00Z', updatedAt: '2026-09-29T23:02:00Z', ...over,
+  }
+}
+
+export function noteOf(over: Partial<Note> = {}): Note {
+  return { id: 'n1', title: 'Ideias de abertura', body: 'Começar pelo **porquê**.', private: true, link: null, updatedAt: '2026-09-29T15:00:00Z', mine: true, ...over }
+}
+
+export function checklistOf(over: Partial<Checklist> = {}): Checklist {
+  return {
+    id: 'c1', title: 'Semana 5', weekId: 'w05', dueDate: null, createdAt: '2026-09-29T15:00:00Z', mine: true,
+    items: [
+      { id: 'i1', text: 'Ligar para 5 empresas', done: true, position: 0 },
+      { id: 'i2', text: 'Escrever 10 respostas', done: false, position: 1 },
+    ],
+    ...over,
+  }
+}
+
+export function bookOf(over: Partial<Book> = {}): Book {
+  return {
+    id: 'carnegie', order: 1, title: 'Como Fazer Amigos e Influenciar Pessoas', author: 'Dale Carnegie', phase: '1', kind: 'livro',
+    filePath: null, externalUrl: null, progress: null, ...over,
+  }
+}
+
+export const courseOf = (over: Partial<Book> = {}): Book =>
+  bookOf({ id: 'sebrae', order: 2, title: 'Cursos online Sebrae', author: null, phase: '2-3', kind: 'curso', externalUrl: 'https://loja.sebrae.com.br/cursos/cursos-online', ...over })
+```
+
+
+- [ ] **Step 6: Rodar e ver passar**
+
+Run: `npx vitest run src/domain src/features/e6Contract.test.ts 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS em todos os arquivos; `tsc` sem erros.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/domain/journalDays.ts src/domain/journalDays.test.ts src/domain/markdown.ts src/domain/markdown.test.ts src/domain/notes.ts src/domain/notes.test.ts src/domain/checklists.ts src/domain/checklists.test.ts src/domain/library.ts src/domain/library.test.ts src/features/journal/types.ts src/features/journal/hooks.ts src/features/notes/types.ts src/features/notes/hooks.ts src/features/checklists/types.ts src/features/checklists/hooks.ts src/features/library/types.ts src/features/library/hooks.ts src/features/e6Contract.test.ts src/test/e6Mocks.ts
+git commit -m "feat(e6): domain rules and data contract for journal, notes, checklists and library"
+```
+
+---
+### Task 34: Migration — notas, biblioteca e Storage — **[W3]**
+
+**Files:**
+- Create: `supabase/migrations/20260930000002_notes_library.sql`, `supabase/tests/journal_notes_library.test.sql`
+
+**Interfaces:**
+- Consumes: schema e RLS das Tasks 3 e 5 (`journal_entries`, `notes`, `books`, `book_progress`, `checklists`, `checklist_items`, buckets `books`) e as migrations da E5.
+- Produces:
+  - `public.touch_updated_at()` e os triggers `notes_touch` (insert/update) e `book_progress_touch` (insert/update): `updated_at` é sempre do banco.
+  - Constraints: `notes` (título ≤ 200, texto ≤ 20.000, `link_type` e `link_id` juntos ou ambos nulos); `books` (`file_path` dentro da pasta do livro, `external_url` só `http(s)`); `book_progress` (`page <= total_pages`).
+  - Policy `books_write` em `storage.objects`: só o mentor, só na pasta de um livro existente (`<book_id>/...`); bucket `books` aceita só `application/pdf`.
+- Nada de RLS novo para notas, caderno e checklists: as políticas da Task 5 já valem; esta Task as **prova** com pgTAP (regravar o dia por `upsert`, mentor lê mas não escreve o caderno, nota privada invisível ao mentor, checklist só lida pelo outro, página só da aluna).
+
+- [ ] **Step 1: Testes pgTAP primeiro**
+
+
+`supabase/tests/journal_notes_library.test.sql`:
+```sql
+begin;
+-- independente das contas locais: tudo é desfeito pelo rollback no fim
+truncate public.profiles cascade;
+delete from auth.users;
+select plan(23);
+
+insert into auth.users (id, email) values
+  ('00000000-0000-0000-0000-00000000000a', 'aluna@test'),
+  ('00000000-0000-0000-0000-00000000000b', 'mentor@test');
+insert into public.profiles values
+  ('00000000-0000-0000-0000-00000000000a', 'aluna', 'Aluna'),
+  ('00000000-0000-0000-0000-00000000000b', 'mentor', 'Mentor');
+
+-- caderno: a aluna salva e regrava o mesmo dia (upsert) sem duplicar
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-00000000000a","role":"authenticated"}';
+insert into public.journal_entries (date, learned, practiced, tomorrow)
+values (timezone('America/Sao_Paulo', now())::date, 'aprendi a ouvir', 'curto', '')
+on conflict (user_id, date) do update set learned = excluded.learned, practiced = excluded.practiced, tomorrow = excluded.tomorrow;
+insert into public.journal_entries (date, learned, practiced, tomorrow)
+values (timezone('America/Sao_Paulo', now())::date, 'aprendi a ouvir o cliente', 'pratiquei o pitch de 30 s', 'amanhã ligo para 3 empresas')
+on conflict (user_id, date) do update set learned = excluded.learned, practiced = excluded.practiced, tomorrow = excluded.tomorrow;
+select is((select count(*)::int from public.journal_entries), 1, 'regravar o mesmo dia atualiza a mesma linha');
+select is((select complete from public.journal_entries), true, 'três campos com 15+ caracteres completam a entrada');
+
+-- mentor lê o caderno, mas não escreve nele (RF-50/52)
+set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-00000000000b","role":"authenticated"}';
+select is((select count(*)::int from public.journal_entries), 1, 'mentor lê o caderno da aluna');
+select throws_ok($$ insert into public.journal_entries (date, learned, practiced, tomorrow)
+  values (timezone('America/Sao_Paulo', now())::date - 1, 'x', 'y', 'z') $$, '42501', null, 'mentor não escreve no caderno');
+
+-- notas: privada por padrão e invisível ao mentor; compartilhada aparece (RF-52)
+set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-00000000000a","role":"authenticated"}';
+insert into public.notes (id, title, body) values ('aaaaaaaa-0000-0000-0000-000000000001', 'segredo', 'técnicas de vendas por telefone');
+insert into public.notes (id, title, body, private) values ('aaaaaaaa-0000-0000-0000-000000000002', 'aberta', 'rotina de prospecção', false);
+select is((select private from public.notes where title = 'segredo'), true, 'nota nasce privada');
+select is((select count(*)::int from public.notes where search @@ websearch_to_tsquery('portuguese', 'vendas')), 1, 'busca em português acha a nota');
+select lives_ok($$ update public.notes set updated_at = '2000-01-01' where title = 'segredo' $$, 'aluna edita a própria nota');
+select isnt((select updated_at from public.notes where title = 'segredo'), '2000-01-01'::timestamptz, 'o banco decide o updated_at');
+select throws_ok($$ insert into public.notes (title, body, link_type) values ('x', 'y', 'week') $$, '23514', null, 'vínculo precisa de tipo e id');
+select throws_ok($$ insert into public.notes (title) values (repeat('x', 201)) $$, '23514', null, 'título com mais de 200 caracteres é recusado');
+
+set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-00000000000b","role":"authenticated"}';
+select is((select array_agg(title order by title) from public.notes), array['aberta'], 'mentor vê só a nota compartilhada');
+update public.notes set title = 'invadida' where id = 'aaaaaaaa-0000-0000-0000-000000000002';
+select is((select title from public.notes where id = 'aaaaaaaa-0000-0000-0000-000000000002'), 'aberta', 'mentor não edita nota da aluna');
+
+-- biblioteca: só o mentor altera livros e sobe PDFs; só a aluna salva a página (RF-61/63)
+select lives_ok($$ update public.books set external_url = 'https://exemplo.com/audiolivro' where id = 'carnegie' $$, 'mentor grava o link externo');
+select throws_ok($$ update public.books set external_url = 'javascript:alert(1)' where id = 'carnegie' $$, '23514', null, 'link externo só http(s)');
+select throws_ok($$ update public.books set file_path = 'outro/arquivo.pdf' where id = 'carnegie' $$, '23514', null, 'arquivo precisa estar na pasta do livro');
+select lives_ok($$ insert into storage.objects (bucket_id, name) values ('books', 'carnegie/1.pdf') $$, 'mentor sobe PDF na pasta do livro');
+select throws_ok($$ insert into storage.objects (bucket_id, name) values ('books', 'livro-que-nao-existe/1.pdf') $$, '42501', null, 'mentor não sobe fora da pasta de um livro');
+
+set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-00000000000a","role":"authenticated"}';
+select throws_ok($$ insert into storage.objects (bucket_id, name) values ('books', 'carnegie/2.pdf') $$, '42501', null, 'aluna não sobe PDF');
+
+select lives_ok($$ insert into public.book_progress (book_id, page, total_pages) values ('carnegie', 3, 200)
+  on conflict (book_id) do update set page = excluded.page, total_pages = excluded.total_pages $$, 'aluna salva a página lida');
+select throws_ok($$ update public.book_progress set page = 300 where book_id = 'carnegie' $$, '23514', null, 'página não passa do total');
+
+-- checklists: cada um edita as próprias; o outro só lê (RF-42)
+insert into public.checklists (id, title) values ('cccccccc-0000-0000-0000-000000000001', 'Vendas da semana');
+insert into public.checklist_items (id, checklist_id, text) values ('dddddddd-0000-0000-0000-000000000001', 'cccccccc-0000-0000-0000-000000000001', 'Ligar para 5 empresas');
+
+set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-00000000000b","role":"authenticated"}';
+select is((select count(*)::int from public.checklist_items), 1, 'mentor lê a checklist da aluna');
+update public.checklist_items set done_at = now() where id = 'dddddddd-0000-0000-0000-000000000001';
+select is((select done_at from public.checklist_items where id = 'dddddddd-0000-0000-0000-000000000001'), null, 'mentor não marca item da aluna');
+select throws_ok($$ insert into public.book_progress (book_id, page, total_pages) values ('gitomer', 1, 100) $$, '42501', null, 'mentor não salva página de leitura');
+
+select * from finish();
+rollback;
+```
+
+
+- [ ] **Step 2: Ver falhar**
+
+Run: `npx --yes supabase@2 test db 2>&1 | tail -15`
+Expected: os testes antigos ok; `journal_notes_library.test.sql` FAIL (o trigger de `updated_at` e as constraints ainda não existem: por exemplo "o banco decide o updated_at" e "vínculo precisa de tipo e id").
+
+- [ ] **Step 3: Implementar a migration**
+
+
+`supabase/migrations/20260930000002_notes_library.sql`:
+```sql
+-- updated_at é do banco: o cliente não escolhe o horário
+create or replace function public.touch_updated_at() returns trigger
+language plpgsql set search_path = '' as $$
+begin
+  new.updated_at := now();
+  return new;
+end $$;
+
+create trigger notes_touch before insert or update on public.notes
+for each row execute function public.touch_updated_at();
+create trigger book_progress_touch before insert or update on public.book_progress
+for each row execute function public.touch_updated_at();
+
+-- Limites e coerência dos dados (o cliente também valida, o banco é a autoridade)
+alter table public.notes
+  add constraint notes_title_len check (char_length(title) <= 200),
+  add constraint notes_body_len check (char_length(body) <= 20000),
+  add constraint notes_link_pair check ((link_type is null) = (link_id is null));
+
+alter table public.books
+  add constraint books_file_path_ck check (file_path is null or file_path like id || '/%'),
+  add constraint books_external_url_ck check (external_url is null or external_url ~* '^https?://');
+
+alter table public.book_progress
+  add constraint book_progress_page_ck check (total_pages is null or page <= total_pages);
+
+-- PDFs: só o mentor envia, só para dentro da pasta de um livro existente, só PDF (RF-61)
+drop policy books_write on storage.objects;
+create policy books_write on storage.objects for insert to authenticated with check (
+  bucket_id = 'books' and public.my_role() = 'mentor'
+  and exists (select 1 from public.books b where b.id = (storage.foldername(name))[1]));
+update storage.buckets set allowed_mime_types = array['application/pdf'] where id = 'books';
+```
+
+
+- [ ] **Step 4: Aplicar e ver passar**
+
+Run: `npx --yes supabase@2 db reset 2>&1 | tail -3 && npx --yes supabase@2 test db 2>&1 | tail -10`
+Expected: "Finished supabase db reset"; `journal.test.sql`, `rls.test.sql`, `simulations.test.sql` e `journal_notes_library.test.sql` todos `ok`; `Result: PASS`. (O reset apaga as contas locais de teste; o E2E recria a aluna e o mentor.)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add supabase/migrations/20260930000002_notes_library.sql supabase/tests/journal_notes_library.test.sql
+git commit -m "feat(db): notes limits and updated_at, book constraints, pdf-only storage policy"
+```
+
+---
+
+### Task 35: `useAutosave`, `useDebounced` e `Markdown` — **[W3]**
+
+**Files:**
+- Create: `src/lib/useAutosave.ts`, `src/lib/useDebounced.ts`, `src/features/notes/Markdown.tsx`
+- Test: `src/lib/useAutosave.test.ts`, `src/features/notes/Markdown.test.tsx`
+
+**Interfaces:**
+- Consumes: `parseMarkdown`, `Block`, `Inline` (Task 33).
+- Produces: `useAutosave<T>({ value, save, delayMs = 1000, enabled = true }): { status: 'idle' | 'saving' | 'saved' | 'error'; error: string | null; flush(): Promise<void> }` (o valor inicial é a linha de base e não é salvo; um salvamento por vez; ao desmontar com alteração pendente, salva); `useDebounced<T>(value, ms): T`; `Markdown({ source })` (sem HTML cru).
+
+- [ ] **Step 1: Testes**
+
+
+`src/lib/useAutosave.test.ts`:
+```ts
+import { act, renderHook } from '@testing-library/react'
+import { useAutosave } from './useAutosave'
+import { useDebounced } from './useDebounced'
+
+beforeEach(() => { vi.useFakeTimers() })
+afterEach(() => { vi.useRealTimers() })
+
+const setup = (initial: string, save = vi.fn().mockResolvedValue(undefined)) => {
+  const hook = renderHook(({ v }) => useAutosave({ value: v, save }), { initialProps: { v: initial } })
+  return { ...hook, save }
+}
+
+test('não salva o valor inicial', () => {
+  const { save } = setup('a')
+  act(() => { vi.advanceTimersByTime(5000) })
+  expect(save).not.toHaveBeenCalled()
+})
+
+test('salva 1 s depois da última alteração e mostra "salvo" (RF-54)', async () => {
+  const { result, rerender, save } = setup('a')
+  rerender({ v: 'ab' })
+  act(() => { vi.advanceTimersByTime(600) })
+  rerender({ v: 'abc' })
+  act(() => { vi.advanceTimersByTime(900) })
+  expect(save).not.toHaveBeenCalled()
+  await act(async () => { vi.advanceTimersByTime(200) })
+  expect(save).toHaveBeenCalledTimes(1)
+  expect(save).toHaveBeenCalledWith('abc')
+  expect(result.current.status).toBe('saved')
+})
+
+test('mudança durante um salvamento em andamento espera a vez e salva o valor mais novo', async () => {
+  let release: () => void = () => {}
+  const save = vi.fn().mockImplementationOnce(() => new Promise<void>((r) => { release = r })).mockResolvedValue(undefined)
+  const { result, rerender } = setup('a', save)
+  rerender({ v: 'b' })
+  await act(async () => { vi.advanceTimersByTime(1000) })
+  expect(save).toHaveBeenCalledTimes(1)
+  rerender({ v: 'c' })
+  await act(async () => { vi.advanceTimersByTime(1000) })
+  expect(save).toHaveBeenCalledTimes(1) // ainda esperando a primeira resposta
+  await act(async () => { release() })
+  expect(save.mock.calls.map((c) => c[0])).toEqual(['b', 'c'])
+  expect(result.current.status).toBe('saved')
+})
+
+test('erro é informado e o próximo ajuste tenta de novo', async () => {
+  const save = vi.fn().mockRejectedValueOnce(new Error('sem rede')).mockResolvedValue(undefined)
+  const { result, rerender } = setup('a', save)
+  rerender({ v: 'b' })
+  await act(async () => { vi.advanceTimersByTime(1000) })
+  expect(result.current.status).toBe('error')
+  expect(result.current.error).toBe('sem rede')
+  rerender({ v: 'bc' })
+  await act(async () => { vi.advanceTimersByTime(1000) })
+  expect(result.current.status).toBe('saved')
+})
+
+test('sair da tela com alteração pendente salva na hora (Review Focus 3)', async () => {
+  const { rerender, unmount, save } = setup('a')
+  rerender({ v: 'novo texto' })
+  unmount()
+  await act(async () => { await Promise.resolve() })
+  expect(save).toHaveBeenCalledWith('novo texto')
+})
+
+test('flush salva sem esperar o tempo', async () => {
+  const { result, rerender, save } = setup('a')
+  rerender({ v: 'b' })
+  await act(async () => { await result.current.flush() })
+  expect(save).toHaveBeenCalledWith('b')
+})
+
+test('useDebounced só assenta depois da pausa', () => {
+  const { result, rerender } = renderHook(({ v }) => useDebounced(v, 300), { initialProps: { v: 'a' } })
+  rerender({ v: 'ab' })
+  expect(result.current).toBe('a')
+  act(() => { vi.advanceTimersByTime(300) })
+  expect(result.current).toBe('ab')
+})
+```
+
+`src/features/notes/Markdown.test.tsx`:
+```tsx
+import { render, screen } from '@testing-library/react'
+import { Markdown } from './Markdown'
+
+test('renderiza títulos, listas, negrito e link seguro', () => {
+  render(<Markdown source={'## Ideias\n\n- **abrir** com o porquê\n- [guia](https://exemplo.com)'} />)
+  expect(screen.getByRole('heading', { name: 'Ideias', level: 3 })).toBeInTheDocument()
+  expect(screen.getAllByRole('listitem')).toHaveLength(2)
+  expect(screen.getByText('abrir').tagName).toBe('STRONG')
+  const link = screen.getByRole('link', { name: 'guia' })
+  expect(link).toHaveAttribute('href', 'https://exemplo.com')
+  expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+  expect(link).toHaveAttribute('target', '_blank')
+})
+
+test('HTML e links perigosos aparecem como texto, sem virar elemento (Review Focus 5)', () => {
+  const { container } = render(<Markdown source={'<script>alert(1)</script> <img src=x onerror=alert(1)>\n\n[clique](javascript:alert(1))'} />)
+  expect(container.querySelector('script')).toBeNull()
+  expect(container.querySelector('img')).toBeNull()
+  expect(container.querySelector('a')).toBeNull()
+  expect(container).toHaveTextContent('<script>alert(1)</script>')
+  expect(container).toHaveTextContent('[clique](javascript:alert(1))')
+})
+```
+
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/lib/useAutosave.test.ts src/features/notes/Markdown.test.tsx 2>&1 | tail -10`
+Expected: FAIL — `Failed to resolve import "./useAutosave"` / `"./Markdown"`.
+
+- [ ] **Step 3: Implementar**
+
+
+`src/lib/useDebounced.ts`:
+```ts
+import { useEffect, useState } from 'react'
+
+/** Valor "assentado": só muda `ms` milissegundos depois da última alteração (usado na busca de notas). */
+export function useDebounced<T>(value: T, ms: number): T {
+  const [settled, setSettled] = useState(value)
+  useEffect(() => {
+    const t = setTimeout(() => setSettled(value), ms)
+    return () => clearTimeout(t)
+  }, [value, ms])
+  return settled
+}
+```
+
+`src/lib/useAutosave.ts`:
+```ts
+import { useCallback, useEffect, useRef, useState } from 'react'
+
+export type AutosaveStatus = 'idle' | 'saving' | 'saved' | 'error'
+
+export interface AutosaveOptions<T> {
+  /** Valor atual do formulário. O valor inicial é a linha de base: só mudanças em relação a ele são salvas. */
+  value: T
+  save: (value: T) => Promise<unknown>
+  /** RF-54: ~1 s depois da última alteração. */
+  delayMs?: number
+  enabled?: boolean
+}
+
+export interface Autosave { status: AutosaveStatus; error: string | null; flush(): Promise<void> }
+
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
+
+/**
+ * RF-54: salva sozinho depois de uma pausa e informa "salvo". Só há um salvamento por vez (o último valor
+ * espera a vez, então respostas fora de ordem nunca sobrescrevem algo mais novo) e, ao sair da tela com
+ * alteração pendente, salva na hora.
+ */
+export function useAutosave<T>({ value, save, delayMs = 1000, enabled = true }: AutosaveOptions<T>): Autosave {
+  const [status, setStatus] = useState<AutosaveStatus>('idle')
+  const [error, setError] = useState<string | null>(null)
+  const latest = useRef(value)
+  const saved = useRef(value)
+  const saveRef = useRef(save)
+  const inFlight = useRef<Promise<void> | null>(null)
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => { latest.current = value; saveRef.current = save })
+
+  const run = useCallback(async (): Promise<void> => {
+    for (;;) {
+      if (inFlight.current) { await inFlight.current; continue }
+      if (same(latest.current, saved.current)) return
+      const sending = latest.current
+      setStatus('saving')
+      setError(null)
+      let failed = false
+      inFlight.current = saveRef.current(sending)
+        .then(() => { saved.current = sending })
+        .catch((e: unknown) => { failed = true; setStatus('error'); setError(e instanceof Error ? e.message : 'Não foi possível salvar.') })
+        .finally(() => { inFlight.current = null })
+      await inFlight.current
+      if (failed) return
+      if (same(latest.current, saved.current)) { setStatus('saved'); return }
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!enabled || same(value, saved.current)) return
+    timer.current = setTimeout(() => { void run() }, delayMs)
+    return () => { if (timer.current) clearTimeout(timer.current) }
+  }, [value, enabled, delayMs, run])
+
+  // Saiu da tela com algo pendente: salva agora.
+  useEffect(() => () => { if (enabled && !same(latest.current, saved.current)) void run() }, [enabled, run])
+
+  const flush = useCallback(async () => {
+    if (timer.current) clearTimeout(timer.current)
+    await run()
+  }, [run])
+
+  return { status, error, flush }
+}
+```
+
+`src/features/notes/Markdown.tsx`:
+```tsx
+import type { ReactNode } from 'react'
+import { parseMarkdown, type Block, type Inline } from '@/domain/markdown'
+
+function inline(nodes: Inline[]): ReactNode[] {
+  return nodes.map((n, i) => {
+    switch (n.t) {
+      case 'text': return n.v
+      case 'strong': return <strong key={i}>{inline(n.c)}</strong>
+      case 'em': return <em key={i}>{inline(n.c)}</em>
+      case 'code': return <code key={i} className="rounded-control bg-raised px-1 font-mono text-[0.9em]">{n.v}</code>
+      case 'link': return <a key={i} href={n.href} target="_blank" rel="noopener noreferrer" className="font-bold text-brand underline underline-offset-4">{inline(n.c)}</a>
+    }
+  })
+}
+
+function block(b: Block, i: number): ReactNode {
+  switch (b.t) {
+    case 'p': return <p key={i} className="whitespace-pre-line">{inline(b.c)}</p>
+    case 'h': {
+      const cls = b.level === 1 ? 'text-2xl' : b.level === 2 ? 'text-xl' : 'text-lg'
+      return <p key={i} role="heading" aria-level={b.level + 1} className={`${cls} font-bold`}>{inline(b.c)}</p>
+    }
+    case 'ul': return <ul key={i} className="list-disc pl-6">{b.items.map((it, j) => <li key={j}>{inline(it)}</li>)}</ul>
+    case 'ol': return <ol key={i} className="list-decimal pl-6">{b.items.map((it, j) => <li key={j}>{inline(it)}</li>)}</ol>
+  }
+}
+
+/** Markdown simples da nota (RF-51), desenhado como elementos React: nenhum HTML cru chega ao DOM. */
+export function Markdown({ source }: { source: string }) {
+  return <div className="flex flex-col gap-3">{parseMarkdown(source).map(block)}</div>
+}
+```
+
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npx vitest run src/lib src/features/notes/Markdown.test.tsx 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS; `tsc` sem erros.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/lib/useAutosave.ts src/lib/useAutosave.test.ts src/lib/useDebounced.ts src/features/notes/Markdown.tsx src/features/notes/Markdown.test.tsx
+git commit -m "feat(e6): autosave hook, debounce hook and safe markdown renderer"
+```
+
+---
+
+### Task 36: Hooks do caderno, das notas e das checklists — **[W3]**
+
+**Files:**
+- Create: `src/lib/db.ts`
+- Modify: `src/test/fakeSupabase.ts` (aceita `textSearch` e passa a ser por bucket, com `remove`), `src/features/journal/hooks.ts`, `src/features/notes/hooks.ts`, `src/features/checklists/hooks.ts` (trocam os esqueletos)
+- Test: `src/features/journal/hooks.test.tsx`, `src/features/notes/hooks.test.tsx`, `src/features/checklists/hooks.test.tsx`
+
+**Interfaces:**
+- Consumes: `supabase`; tudo da Task 33 (tipos, domínio, mocks); `createFakeSupabase` (Task 23); `validateChecklistDraft`.
+- Produces: os hooks do contrato da Task 33 para `journal`, `notes` e `checklists`; `fail(error, friendly)` e `myId()` em `src/lib/db.ts`. Query keys internas: `['journal_entries']`, `['notes', termo]`, `['note', id]`, `['checklists']`; além delas, cada gravação do caderno invalida `['journal_days']` (a chave de `useJournalDays`).
+- Mensagens entregues às telas: "O prazo deste dia já passou (era até 12:00 do dia seguinte).", "Só a aluna escreve no caderno.", "Só quem escreveu a nota pode editá-la." / "…apagá-la.", "Título (até 200 caracteres) ou texto (até 20.000) grande demais.", "Só quem criou a lista marca os itens." / "…pode apagá-la.".
+- Para o `fake`: `results['storage:remove']` e chamadas `storage:<bucket>` (a Task 37 usa `books`; as chamadas de `recordings` da E5 continuam iguais).
+
+- [ ] **Step 1: Atualizar o Supabase falso e escrever os testes**
+
+`src/test/fakeSupabase.ts` (substitui o arquivo inteiro; só acrescenta `textSearch`, o `remove` e o nome do bucket nas chamadas de Storage):
+
+```ts
+export type Result = { data: unknown; error: unknown; count?: number | null }
+export interface Call { table: string; method: string; args: unknown[] }
+
+const BUILDER_METHODS = ['select', 'insert', 'update', 'upsert', 'delete', 'eq', 'neq', 'in', 'is', 'order', 'limit', 'textSearch', 'maybeSingle', 'single']
+
+/**
+ * Supabase falso para testes de hooks. Cada `await` de uma consulta consome o próximo item de
+ * `results[<tabela>]` (ou `results['rpc:<função>']`, `results['storage:upload']`, `results['storage:signed']`, `results['storage:remove']`);
+ * sem item, devolve `{ data: [], error: null }`. Toda chamada encadeada fica registrada em `calls`.
+ */
+export function createFakeSupabase() {
+  const results: Record<string, Result[]> = {}
+  const calls: Call[] = []
+  const next = (key: string, fallback: Result): Result => results[key]?.shift() ?? fallback
+
+  const from = vi.fn((table: string) => {
+    const b: Record<string, unknown> = {}
+    for (const m of BUILDER_METHODS) {
+      b[m] = (...args: unknown[]) => { calls.push({ table, method: m, args }); return b }
+    }
+    b.then = (ok: (r: Result) => unknown, fail: (e: unknown) => unknown) =>
+      Promise.resolve(next(table, { data: [], error: null })).then(ok, fail)
+    return b
+  })
+  const rpc = vi.fn(async (fn: string, args: unknown) => {
+    calls.push({ table: `rpc:${fn}`, method: 'rpc', args: [args] })
+    return next(`rpc:${fn}`, { data: null, error: null })
+  })
+  const bucketApi = (bucket: string) => ({
+    upload: vi.fn(async (path: string, _blob: Blob, options: unknown) => {
+      calls.push({ table: `storage:${bucket}`, method: 'upload', args: [path, options] })
+      return next('storage:upload', { data: { path }, error: null })
+    }),
+    createSignedUrl: vi.fn(async (path: string, seconds: number) => {
+      calls.push({ table: `storage:${bucket}`, method: 'createSignedUrl', args: [path, seconds] })
+      return next('storage:signed', { data: { signedUrl: `https://signed.test/${path}` }, error: null })
+    }),
+    remove: vi.fn(async (paths: string[]) => {
+      calls.push({ table: `storage:${bucket}`, method: 'remove', args: [paths] })
+      return next('storage:remove', { data: [], error: null })
+    }),
+  })
+  const getSession = vi.fn().mockResolvedValue({ data: { session: { user: { id: 'me' } } } })
+  const storage = { from: vi.fn((bucket: string) => bucketApi(bucket)) }
+
+  return {
+    supabase: { from, rpc, storage, auth: { getSession } },
+    results,
+    calls,
+    reset() {
+      calls.length = 0
+      for (const k of Object.keys(results)) delete results[k]
+    },
+  }
+}
+
+export type FakeSupabase = ReturnType<typeof createFakeSupabase>
+```
+
+
+
+`src/features/journal/hooks.test.tsx`:
+```tsx
+import type { ReactNode } from 'react'
+import { act, renderHook, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import type { FakeSupabase } from '@/test/fakeSupabase'
+
+vi.mock('@/lib/supabase', async () => {
+  const { createFakeSupabase } = await import('@/test/fakeSupabase')
+  const fake = createFakeSupabase()
+  return { supabase: fake.supabase, fake }
+})
+
+const { fake } = (await import('@/lib/supabase')) as unknown as { fake: FakeSupabase }
+const { results, calls } = fake
+
+import { useJournalEntries, useSaveJournalEntry } from './hooks'
+
+function setup() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+  const Wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+  return { qc, Wrapper }
+}
+
+beforeEach(() => fake.reset())
+
+const row = (over: Record<string, unknown> = {}) => ({
+  date: '2026-09-29', learned: 'aprendi a ouvir', practiced: 'pratiquei o pitch', tomorrow: 'ligar para 3 empresas',
+  complete: true, late: false, created_at: '2026-09-29T22:10:00Z', updated_at: '2026-09-29T23:02:00Z', ...over,
+})
+
+test('useJournalEntries mapeia as linhas e mantém a ordem do banco', async () => {
+  results.journal_entries = [{ data: [row(), row({ date: '2026-09-28', late: true })], error: null }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useJournalEntries(), { wrapper: Wrapper })
+  await waitFor(() => expect(result.current.data).toHaveLength(2))
+  expect(result.current.data![0]).toEqual({
+    date: '2026-09-29', learned: 'aprendi a ouvir', practiced: 'pratiquei o pitch', tomorrow: 'ligar para 3 empresas',
+    complete: true, late: false, createdAt: '2026-09-29T22:10:00Z', updatedAt: '2026-09-29T23:02:00Z',
+  })
+  expect(result.current.data![1].late).toBe(true)
+  expect(calls).toContainEqual({ table: 'journal_entries', method: 'order', args: ['date', { ascending: false }] })
+})
+
+test('salvar faz upsert por (usuário, dia) sem mandar complete, late nem horários; devolve o que o banco calculou', async () => {
+  results.journal_entries = [{ data: row({ complete: false }), error: null }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useSaveJournalEntry(), { wrapper: Wrapper })
+  let saved: unknown
+  await act(async () => { saved = await result.current.mutateAsync({ date: '2026-09-29', learned: 'a', practiced: 'b', tomorrow: 'c' }) })
+  const up = calls.find((c) => c.method === 'upsert')!
+  expect(up.args).toEqual([{ date: '2026-09-29', learned: 'a', practiced: 'b', tomorrow: 'c' }, { onConflict: 'user_id,date' }])
+  expect(saved).toMatchObject({ complete: false, late: false })
+})
+
+test('dia fechado e conta errada têm mensagem clara (Review Focus 1)', async () => {
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useSaveJournalEntry(), { wrapper: Wrapper })
+  results.journal_entries = [{ data: null, error: { message: 'journal_closed', code: 'P0001' } }]
+  await act(async () => { await expect(result.current.mutateAsync({ date: '2026-09-27', learned: 'a', practiced: 'b', tomorrow: 'c' })).rejects.toThrow(/prazo deste dia já passou/) })
+  results.journal_entries = [{ data: null, error: { message: 'new row violates row-level security policy', code: '42501' } }]
+  await act(async () => { await expect(result.current.mutateAsync({ date: '2026-09-29', learned: 'a', practiced: 'b', tomorrow: 'c' })).rejects.toThrow('Só a aluna escreve no caderno.') })
+})
+```
+
+`src/features/notes/hooks.test.tsx`:
+```tsx
+import type { ReactNode } from 'react'
+import { act, renderHook, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import type { FakeSupabase } from '@/test/fakeSupabase'
+
+vi.mock('@/lib/supabase', async () => {
+  const { createFakeSupabase } = await import('@/test/fakeSupabase')
+  const fake = createFakeSupabase()
+  return { supabase: fake.supabase, fake }
+})
+
+const { fake } = (await import('@/lib/supabase')) as unknown as { fake: FakeSupabase }
+const { results, calls } = fake
+
+import { useDeleteNote, useNote, useNotes, useSaveNote } from './hooks'
+
+function setup() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+  const Wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+  return { qc, Wrapper }
+}
+
+beforeEach(() => fake.reset())
+
+const row = (over: Record<string, unknown> = {}) => ({
+  id: 'n1', author: 'me', title: 'Ideias', body: 'texto', private: true, link_type: null, link_id: null, updated_at: '2026-09-29T15:00:00Z', ...over,
+})
+
+test('useNotes marca as minhas e converte o vínculo', async () => {
+  results.notes = [{ data: [row({ link_type: 'week', link_id: 'w05' }), row({ id: 'n2', author: 'aluna-1', private: false })], error: null }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useNotes(''), { wrapper: Wrapper })
+  await waitFor(() => expect(result.current.data).toHaveLength(2))
+  expect(result.current.data![0]).toEqual({ id: 'n1', title: 'Ideias', body: 'texto', private: true, link: { type: 'week', id: 'w05' }, updatedAt: '2026-09-29T15:00:00Z', mine: true })
+  expect(result.current.data![1]).toMatchObject({ mine: false, private: false, link: null })
+  expect(calls.some((c) => c.method === 'textSearch')).toBe(false)
+})
+
+test('busca (RF-53) usa o índice em português e ignora espaços nas pontas', async () => {
+  results.notes = [{ data: [row()], error: null }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useNotes('  vendas por telefone '), { wrapper: Wrapper })
+  await waitFor(() => expect(result.current.data).toHaveLength(1))
+  expect(calls).toContainEqual({ table: 'notes', method: 'textSearch', args: ['search', 'vendas por telefone', { config: 'portuguese', type: 'websearch' }] })
+})
+
+test('useNote devolve null quando a nota não existe ou não é visível', async () => {
+  results.notes = [{ data: null, error: null }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useNote('sumiu'), { wrapper: Wrapper })
+  await waitFor(() => expect(result.current.isSuccess).toBe(true))
+  expect(result.current.data).toBeNull()
+})
+
+test('useNote sem id não consulta', () => {
+  const { Wrapper } = setup()
+  renderHook(() => useNote(undefined), { wrapper: Wrapper })
+  expect(calls).toHaveLength(0)
+})
+
+test('salvar usa o id do cliente (upsert): autosave e toque duplo não duplicam a nota (Review Focus 3)', async () => {
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useSaveNote(), { wrapper: Wrapper })
+  const vars = { id: 'uuid-1', title: 'T', body: 'B', private: true, link: { type: 'book' as const, id: 'carnegie' } }
+  await act(async () => { await result.current.mutateAsync(vars); await result.current.mutateAsync(vars) })
+  const ups = calls.filter((c) => c.method === 'upsert')
+  expect(ups).toHaveLength(2)
+  expect(ups[0].args).toEqual([{ id: 'uuid-1', title: 'T', body: 'B', private: true, link_type: 'book', link_id: 'carnegie' }, { onConflict: 'id' }])
+})
+
+test('nota nova sem vínculo grava nulos; erros ficam legíveis', async () => {
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useSaveNote(), { wrapper: Wrapper })
+  await act(async () => { await result.current.mutateAsync({ id: 'u', title: '', body: '', private: true, link: null }) })
+  expect(calls.find((c) => c.method === 'upsert')!.args[0]).toMatchObject({ link_type: null, link_id: null, private: true })
+  results.notes = [{ data: null, error: { message: 'violates check constraint', code: '23514' } }]
+  await act(async () => { await expect(result.current.mutateAsync({ id: 'u', title: 'x', body: 'y', private: true, link: null })).rejects.toThrow(/grande demais/) })
+  results.notes = [{ data: null, error: { message: 'row-level security', code: '42501' } }]
+  await act(async () => { await expect(result.current.mutateAsync({ id: 'u', title: 'x', body: 'y', private: true, link: null })).rejects.toThrow('Só quem escreveu a nota pode editá-la.') })
+})
+
+test('apagar nota de outra pessoa (0 linhas) dá erro legível', async () => {
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useDeleteNote(), { wrapper: Wrapper })
+  results.notes = [{ data: [], error: null }]
+  await act(async () => { await expect(result.current.mutateAsync('n2')).rejects.toThrow('Só quem escreveu a nota pode apagá-la.') })
+  results.notes = [{ data: [{ id: 'n1' }], error: null }]
+  await act(async () => { await result.current.mutateAsync('n1') })
+})
+```
+
+`src/features/checklists/hooks.test.tsx`:
+```tsx
+import type { ReactNode } from 'react'
+import { act, renderHook, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import type { FakeSupabase } from '@/test/fakeSupabase'
+
+vi.mock('@/lib/supabase', async () => {
+  const { createFakeSupabase } = await import('@/test/fakeSupabase')
+  const fake = createFakeSupabase()
+  return { supabase: fake.supabase, fake }
+})
+
+const { fake } = (await import('@/lib/supabase')) as unknown as { fake: FakeSupabase }
+const { results, calls } = fake
+
+import type { Checklist } from './types'
+import { useChecklists, useDeleteChecklist, useSaveChecklist, useToggleChecklistItem } from './hooks'
+
+function setup() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+  const Wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+  return { qc, Wrapper }
+}
+
+beforeEach(() => fake.reset())
+
+test('useChecklists ordena os itens por posição e marca as minhas', async () => {
+  results.checklists = [{ data: [{
+    id: 'c1', owner: 'me', title: 'Semana 5', week_id: 'w05', due_date: '2026-10-04', created_at: 'x',
+    checklist_items: [{ id: 'i2', text: 'segundo', done_at: null, position: 1 }, { id: 'i1', text: 'primeiro', done_at: '2026-09-29T10:00:00Z', position: 0 }],
+  }, { id: 'c2', owner: 'outra', title: 'Da mentora', week_id: null, due_date: null, created_at: 'y', checklist_items: [] }], error: null }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useChecklists(), { wrapper: Wrapper })
+  await waitFor(() => expect(result.current.data).toHaveLength(2))
+  expect(result.current.data![0].items.map((i) => [i.text, i.done])).toEqual([['primeiro', true], ['segundo', false]])
+  expect(result.current.data![0]).toMatchObject({ mine: true, weekId: 'w05', dueDate: '2026-10-04' })
+  expect(result.current.data![1].mine).toBe(false)
+})
+
+test('salvar lista: cabeçalho, remove os itens que saíram e regrava os que ficam sem tocar em done_at', async () => {
+  results.checklist_items = [{ data: [{ id: 'i1' }, { id: 'velho' }], error: null }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useSaveChecklist(), { wrapper: Wrapper })
+  await act(async () => {
+    await result.current.mutateAsync({ id: 'c1', title: ' Semana 5 ', weekId: 'w05', dueDate: null, items: [{ id: 'i1', text: ' primeiro ' }, { id: 'i3', text: 'novo' }] })
+  })
+  expect(calls.find((c) => c.table === 'checklists' && c.method === 'upsert')!.args).toEqual([{ id: 'c1', title: 'Semana 5', week_id: 'w05', due_date: null }, { onConflict: 'id' }])
+  expect(calls).toContainEqual({ table: 'checklist_items', method: 'in', args: ['id', ['velho']] })
+  const items = calls.filter((c) => c.table === 'checklist_items' && c.method === 'upsert')[0].args[0]
+  expect(items).toEqual([{ id: 'i1', checklist_id: 'c1', text: 'primeiro', position: 0 }, { id: 'i3', checklist_id: 'c1', text: 'novo', position: 1 }])
+})
+
+test('lista inválida não chega ao banco', async () => {
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useSaveChecklist(), { wrapper: Wrapper })
+  await act(async () => { await expect(result.current.mutateAsync({ id: 'c', title: '', weekId: null, dueDate: null, items: [{ id: 'a', text: 'x' }] })).rejects.toThrow(/título/) })
+  expect(calls).toHaveLength(0)
+})
+
+test('marcar item é otimista e volta atrás quando o banco recusa (só o dono marca)', async () => {
+  const { qc, Wrapper } = setup()
+  const list: Checklist = { id: 'c1', title: 'x', weekId: null, dueDate: null, createdAt: 'x', mine: false, items: [{ id: 'i1', text: 'a', done: false, position: 0 }] }
+  qc.setQueryData<Checklist[]>(['checklists'], [list])
+  const { result } = renderHook(() => useToggleChecklistItem(), { wrapper: Wrapper })
+  results.checklist_items = [{ data: [], error: null }]
+  await act(async () => { await result.current.mutateAsync({ itemId: 'i1', done: true }).catch(() => undefined) })
+  expect(qc.getQueryData<Checklist[]>(['checklists'])![0].items[0].done).toBe(false)
+  await waitFor(() => expect(result.current.error?.message).toBe('Só quem criou a lista marca os itens.'))
+})
+
+test('marcar grava done_at; desmarcar grava null; apagar de outra pessoa dá erro', async () => {
+  const { Wrapper } = setup()
+  const toggle = renderHook(() => useToggleChecklistItem(), { wrapper: Wrapper })
+  results.checklist_items = [{ data: [{ id: 'i1' }], error: null }, { data: [{ id: 'i1' }], error: null }]
+  await act(async () => { await toggle.result.current.mutateAsync({ itemId: 'i1', done: true }); await toggle.result.current.mutateAsync({ itemId: 'i1', done: false }) })
+  const updates = calls.filter((c) => c.method === 'update').map((c) => (c.args[0] as { done_at: string | null }).done_at)
+  expect(updates[0]).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+  expect(updates[1]).toBeNull()
+  const del = renderHook(() => useDeleteChecklist(), { wrapper: Wrapper })
+  results.checklists = [{ data: [], error: null }]
+  await act(async () => { await expect(del.result.current.mutateAsync('c9')).rejects.toThrow('Só quem criou a lista pode apagá-la.') })
+})
+```
+
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/features/journal src/features/notes/hooks.test.tsx src/features/checklists 2>&1 | tail -15`
+Expected: FAIL — `useJournalEntries: implementado na Task 36` (e os equivalentes de notas e listas).
+
+- [ ] **Step 3: Implementar**
+
+
+`src/lib/db.ts`:
+```ts
+import { supabase } from '@/lib/supabase'
+
+type DbError = { message: string; code?: string }
+
+/** Lança um erro legível: `friendly` mapeia código SQL ou trecho da mensagem para texto em pt-BR. */
+export function fail(error: DbError, friendly: Record<string, string> = {}): never {
+  const key = Object.keys(friendly).find((k) => error.code === k || error.message.includes(k))
+  throw new Error(key ? friendly[key] : error.message)
+}
+
+export async function myId(): Promise<string> {
+  const { data: { session } } = await supabase.auth.getSession()
+  if (!session) throw new Error('Sessão expirada. Entre de novo.')
+  return session.user.id
+}
+```
+
+`src/features/journal/hooks.ts`:
+```ts
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { fail } from '@/lib/db'
+import { supabase } from '@/lib/supabase'
+import type { JournalEntry, SaveJournalVars } from './types'
+
+const ENTRIES = ['journal_entries'] as const
+const COLUMNS = 'date, learned, practiced, tomorrow, complete, late, created_at, updated_at'
+
+interface Row { date: string; learned: string; practiced: string; tomorrow: string; complete: boolean; late: boolean; created_at: string; updated_at: string }
+const toEntry = (r: Row): JournalEntry => ({
+  date: r.date, learned: r.learned, practiced: r.practiced, tomorrow: r.tomorrow,
+  complete: r.complete, late: r.late, createdAt: r.created_at, updatedAt: r.updated_at,
+})
+
+/** Últimos 120 dias com entrada, do mais novo ao mais antigo. Os dois perfis leem; só a aluna escreve. */
+export function useJournalEntries() {
+  return useQuery({
+    queryKey: ENTRIES,
+    queryFn: async (): Promise<JournalEntry[]> => {
+      const { data, error } = await supabase.from('journal_entries').select(COLUMNS).order('date', { ascending: false }).limit(120)
+      if (error) throw error
+      return (data as Row[]).map(toEntry)
+    },
+  })
+}
+
+/** RF-50/54: grava o rascunho do dia. `complete`, `late` e os horários voltam calculados pelo banco. */
+export function useSaveJournalEntry() {
+  const qc = useQueryClient()
+  return useMutation<JournalEntry, Error, SaveJournalVars>({
+    mutationFn: async ({ date, learned, practiced, tomorrow }) => {
+      const { data, error } = await supabase.from('journal_entries')
+        .upsert({ date, learned, practiced, tomorrow }, { onConflict: 'user_id,date' })
+        .select(COLUMNS).single()
+      if (error) fail(error, {
+        journal_closed: 'O prazo deste dia já passou (era até 12:00 do dia seguinte).',
+        '42501': 'Só a aluna escreve no caderno.',
+      })
+      return toEntry(data as Row)
+    },
+    // `journal_days` é a chave de `useJournalDays` (streak e tela Hoje).
+    onSuccess: () => Promise.all([qc.invalidateQueries({ queryKey: ENTRIES }), qc.invalidateQueries({ queryKey: ['journal_days'] })]),
+  })
+}
+```
+
+`src/features/notes/hooks.ts`:
+```ts
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { NoteLink, NoteLinkType } from '@/domain/notes'
+import { fail, myId } from '@/lib/db'
+import { supabase } from '@/lib/supabase'
+import type { Note, SaveNoteVars } from './types'
+
+const NOTES = ['notes'] as const
+const COLUMNS = 'id, author, title, body, private, link_type, link_id, updated_at'
+
+interface Row { id: string; author: string; title: string; body: string; private: boolean; link_type: NoteLinkType | null; link_id: string | null; updated_at: string }
+const toNote = (r: Row, me: string): Note => ({
+  id: r.id, title: r.title, body: r.body, private: r.private, updatedAt: r.updated_at, mine: r.author === me,
+  link: r.link_type && r.link_id ? ({ type: r.link_type, id: r.link_id } satisfies NoteLink) : null,
+})
+
+/** RF-51/53: notas que o usuário pode ver (as próprias e, para o mentor, as compartilhadas), com busca em português. */
+export function useNotes(search: string) {
+  const term = search.trim()
+  return useQuery({
+    queryKey: [...NOTES, term],
+    queryFn: async (): Promise<Note[]> => {
+      const me = await myId()
+      let q = supabase.from('notes').select(COLUMNS).order('updated_at', { ascending: false })
+      if (term) q = q.textSearch('search', term, { config: 'portuguese', type: 'websearch' })
+      const { data, error } = await q
+      if (error) throw error
+      return (data as Row[]).map((r) => toNote(r, me))
+    },
+  })
+}
+
+export function useNote(id: string | undefined) {
+  return useQuery({
+    queryKey: ['note', id],
+    enabled: id !== undefined,
+    queryFn: async (): Promise<Note | null> => {
+      const me = await myId()
+      const { data, error } = await supabase.from('notes').select(COLUMNS).eq('id', id!).maybeSingle()
+      if (error) throw error
+      return data ? toNote(data as Row, me) : null
+    },
+  })
+}
+
+const FRIENDLY = {
+  '23514': 'Título (até 200 caracteres) ou texto (até 20.000) grande demais.',
+  '42501': 'Só quem escreveu a nota pode editá-la.',
+}
+
+/** Cria ou atualiza pelo `id` do cliente: salvar duas vezes (autosave, toque duplo) nunca duplica a nota. */
+export function useSaveNote() {
+  const qc = useQueryClient()
+  return useMutation<void, Error, SaveNoteVars>({
+    mutationFn: async ({ id, title, body, private: isPrivate, link }) => {
+      const { error } = await supabase.from('notes').upsert(
+        { id, title, body, private: isPrivate, link_type: link?.type ?? null, link_id: link?.id ?? null },
+        { onConflict: 'id' },
+      )
+      if (error) fail(error, FRIENDLY)
+    },
+    onSuccess: (_d, v) => Promise.all([qc.invalidateQueries({ queryKey: NOTES }), qc.invalidateQueries({ queryKey: ['note', v.id] })]),
+  })
+}
+
+export function useDeleteNote() {
+  const qc = useQueryClient()
+  return useMutation<void, Error, string>({
+    mutationFn: async (id) => {
+      const { data, error } = await supabase.from('notes').delete().eq('id', id).select('id')
+      if (error) throw error
+      if (!data || data.length === 0) throw new Error('Só quem escreveu a nota pode apagá-la.')
+    },
+    onSuccess: (_d, id) => Promise.all([qc.invalidateQueries({ queryKey: NOTES }), qc.removeQueries({ queryKey: ['note', id] })]),
+  })
+}
+```
+
+`src/features/checklists/hooks.ts`:
+```ts
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { validateChecklistDraft } from '@/domain/checklists'
+import { myId } from '@/lib/db'
+import { supabase } from '@/lib/supabase'
+import type { Checklist, SaveChecklistVars, ToggleChecklistItemVars } from './types'
+
+const LISTS = ['checklists'] as const
+const NOT_OWNER = 'Só quem criou a lista pode editá-la.'
+
+interface ItemRow { id: string; text: string; done_at: string | null; position: number }
+interface Row { id: string; owner: string; title: string; week_id: string | null; due_date: string | null; created_at: string; checklist_items: ItemRow[] }
+
+/** RF-42: listas das duas contas (cada uma edita só as suas). */
+export function useChecklists() {
+  return useQuery({
+    queryKey: LISTS,
+    queryFn: async (): Promise<Checklist[]> => {
+      const me = await myId()
+      const { data, error } = await supabase.from('checklists')
+        .select('id, owner, title, week_id, due_date, created_at, checklist_items(id, text, done_at, position)')
+        .order('created_at', { ascending: false })
+      if (error) throw error
+      return (data as unknown as Row[]).map((r) => ({
+        id: r.id, title: r.title, weekId: r.week_id, dueDate: r.due_date, createdAt: r.created_at, mine: r.owner === me,
+        items: [...r.checklist_items].sort((a, b) => a.position - b.position)
+          .map((i) => ({ id: i.id, text: i.text, done: i.done_at !== null, position: i.position })),
+      }))
+    },
+  })
+}
+
+/**
+ * Cria ou atualiza a lista e troca o conjunto de itens. Os ids vêm do cliente, então repetir o envio depois
+ * de uma falha no meio do caminho termina o trabalho sem duplicar nada; a marcação dos itens que ficam é preservada.
+ */
+export function useSaveChecklist() {
+  const qc = useQueryClient()
+  return useMutation<void, Error, SaveChecklistVars>({
+    mutationFn: async (v) => {
+      const problem = validateChecklistDraft({ title: v.title, weekId: v.weekId, dueDate: v.dueDate, items: v.items })
+      if (problem) throw new Error(problem)
+      const head = await supabase.from('checklists').upsert(
+        { id: v.id, title: v.title.trim(), week_id: v.weekId, due_date: v.dueDate }, { onConflict: 'id' })
+      if (head.error) throw head.error.code === '42501' ? new Error(NOT_OWNER) : head.error
+      const existing = await supabase.from('checklist_items').select('id').eq('checklist_id', v.id)
+      if (existing.error) throw existing.error
+      const keep = new Set(v.items.map((i) => i.id))
+      const removed = (existing.data as { id: string }[]).map((r) => r.id).filter((id) => !keep.has(id))
+      if (removed.length > 0) {
+        const del = await supabase.from('checklist_items').delete().in('id', removed)
+        if (del.error) throw del.error
+      }
+      const up = await supabase.from('checklist_items').upsert(
+        v.items.map((it, position) => ({ id: it.id, checklist_id: v.id, text: it.text.trim(), position })), { onConflict: 'id' })
+      if (up.error) throw up.error
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: LISTS }),
+  })
+}
+
+export function useToggleChecklistItem() {
+  const qc = useQueryClient()
+  return useMutation<void, Error, ToggleChecklistItemVars, { prev?: Checklist[] }>({
+    mutationFn: async ({ itemId, done }) => {
+      const { data, error } = await supabase.from('checklist_items')
+        .update({ done_at: done ? new Date().toISOString() : null }).eq('id', itemId).select('id')
+      if (error) throw error
+      if (!data || data.length === 0) throw new Error('Só quem criou a lista marca os itens.')
+    },
+    onMutate: async ({ itemId, done }) => {
+      await qc.cancelQueries({ queryKey: LISTS })
+      const prev = qc.getQueryData<Checklist[]>(LISTS)
+      if (prev) {
+        qc.setQueryData<Checklist[]>(LISTS, prev.map((l) => ({ ...l, items: l.items.map((i) => (i.id === itemId ? { ...i, done } : i)) })))
+      }
+      return { prev }
+    },
+    onError: (_e, _v, ctx) => { if (ctx?.prev) qc.setQueryData(LISTS, ctx.prev) },
+    onSettled: () => qc.invalidateQueries({ queryKey: LISTS }),
+  })
+}
+
+export function useDeleteChecklist() {
+  const qc = useQueryClient()
+  return useMutation<void, Error, string>({
+    mutationFn: async (id) => {
+      const { data, error } = await supabase.from('checklists').delete().eq('id', id).select('id')
+      if (error) throw error
+      if (!data || data.length === 0) throw new Error('Só quem criou a lista pode apagá-la.')
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: LISTS }),
+  })
+}
+```
+
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npx vitest run src/features/journal src/features/notes src/features/checklists src/features/simulations 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS (os testes da E5 continuam verdes com o Supabase falso novo); `tsc` sem erros.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/lib/db.ts src/test/fakeSupabase.ts src/features/journal/hooks.ts src/features/journal/hooks.test.tsx src/features/notes/hooks.ts src/features/notes/hooks.test.tsx src/features/checklists/hooks.ts src/features/checklists/hooks.test.tsx
+git commit -m "feat(e6): supabase hooks for journal, notes and checklists"
+```
+
+---
+
+### Task 37: Hooks da biblioteca — **[W3]**
+
+**Files:**
+- Modify: `src/features/library/hooks.ts` (troca o esqueleto)
+- Test: `src/features/library/hooks.test.tsx`
+
+**Interfaces:**
+- Consumes: `supabase` (tabelas `books` e `book_progress`, bucket `books`); `fail` (Task 36); `validatePdfFile`, `bookFilePath`, `normalizeExternalUrl`, `clampPage` (Task 33); `createFakeSupabase` com Storage por bucket (Task 36); migration da Task 34 para o comportamento real.
+- Produces: os 6 hooks do contrato da Task 33 para `library`. Query keys internas: `['books']`, `['book_url', filePath]`. `useSaveBookProgress` atualiza o cache de `['books']` em vez de recarregar a lista a cada página.
+- Mensagens entregues às telas: "Só o mentor altera os materiais da biblioteca.", "Só a aluna salva a página de leitura.", "Use um link que comece com http:// ou https://." e as de `validatePdfFile` ("Envie um arquivo PDF.", "O PDF pode ter no máximo 50 MB.").
+
+- [ ] **Step 1: Testes**
+
+
+`src/features/library/hooks.test.tsx`:
+```tsx
+import type { ReactNode } from 'react'
+import { act, renderHook, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import type { FakeSupabase } from '@/test/fakeSupabase'
+
+vi.mock('@/lib/supabase', async () => {
+  const { createFakeSupabase } = await import('@/test/fakeSupabase')
+  const fake = createFakeSupabase()
+  return { supabase: fake.supabase, fake }
+})
+
+const { fake } = (await import('@/lib/supabase')) as unknown as { fake: FakeSupabase }
+const { results, calls } = fake
+
+import type { Book } from './types'
+import { useBooks, useBookUrl, useRemoveBookFile, useSaveBookLink, useSaveBookProgress, useUploadBook } from './hooks'
+
+function setup() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+  const Wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+  return { qc, Wrapper }
+}
+
+beforeEach(() => fake.reset())
+
+const pdf = (size = 1000, type = 'application/pdf') => new File([new Uint8Array(size)], 'livro.pdf', { type })
+
+test('useBooks traz a página lida de cada livro', async () => {
+  results.books = [{ data: [
+    { id: 'carnegie', order: 1, title: 'Como Fazer Amigos', author: 'Dale Carnegie', phase: '1', kind: 'livro', file_path: 'carnegie/1.pdf', external_url: null, book_progress: { page: 12, total_pages: 200, updated_at: 'x' } },
+    { id: 'sebrae', order: 2, title: 'Cursos', author: null, phase: '2-3', kind: 'curso', file_path: null, external_url: 'https://loja.sebrae.com.br', book_progress: null },
+  ], error: null }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useBooks(), { wrapper: Wrapper })
+  await waitFor(() => expect(result.current.data).toHaveLength(2))
+  expect(result.current.data![0]).toMatchObject({ id: 'carnegie', filePath: 'carnegie/1.pdf', progress: { page: 12, totalPages: 200 } })
+  expect(result.current.data![1]).toMatchObject({ kind: 'curso', progress: null, externalUrl: 'https://loja.sebrae.com.br' })
+  expect(calls).toContainEqual({ table: 'books', method: 'order', args: ['order'] })
+})
+
+test('URL assinada de 1 hora; sem arquivo não consulta (RF-65)', async () => {
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useBookUrl('carnegie/1.pdf'), { wrapper: Wrapper })
+  await waitFor(() => expect(result.current.data).toBe('https://signed.test/carnegie/1.pdf'))
+  expect(calls).toContainEqual({ table: 'storage:books', method: 'createSignedUrl', args: ['carnegie/1.pdf', 3600] })
+  fake.reset()
+  renderHook(() => useBookUrl(null), { wrapper: Wrapper })
+  expect(calls).toHaveLength(0)
+})
+
+test('salvar página: limita ao total e atualiza o cache sem recarregar a lista (Review Focus 4)', async () => {
+  const { qc, Wrapper } = setup()
+  const book: Book = { id: 'carnegie', order: 1, title: 'x', author: null, phase: '1', kind: 'livro', filePath: 'carnegie/1.pdf', externalUrl: null, progress: null }
+  qc.setQueryData<Book[]>(['books'], [book])
+  const { result } = renderHook(() => useSaveBookProgress(), { wrapper: Wrapper })
+  await act(async () => { await result.current.mutateAsync({ bookId: 'carnegie', page: 999, totalPages: 200 }) })
+  expect(calls.find((c) => c.method === 'upsert')!.args).toEqual([{ book_id: 'carnegie', page: 200, total_pages: 200 }, { onConflict: 'book_id' }])
+  expect(qc.getQueryData<Book[]>(['books'])![0].progress).toMatchObject({ page: 200, totalPages: 200 })
+})
+
+test('mentor não salva página: mensagem clara', async () => {
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useSaveBookProgress(), { wrapper: Wrapper })
+  results.book_progress = [{ data: null, error: { message: 'row-level security', code: '42501' } }]
+  await act(async () => { await expect(result.current.mutateAsync({ bookId: 'carnegie', page: 1, totalPages: null })).rejects.toThrow('Só a aluna salva a página de leitura.') })
+})
+
+test('upload: sobe com nome novo na pasta do livro, aponta o livro e apaga o arquivo anterior (RF-61)', async () => {
+  results.books = [{ data: [{ id: 'carnegie' }], error: null }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useUploadBook(), { wrapper: Wrapper })
+  await act(async () => { await result.current.mutateAsync({ bookId: 'carnegie', file: pdf(), previousPath: 'carnegie/antigo.pdf' }) })
+  const up = calls.find((c) => c.method === 'upload')!
+  expect(up.table).toBe('storage:books')
+  expect(up.args[0]).toMatch(/^carnegie\/\d+\.pdf$/)
+  expect(up.args[1]).toEqual({ contentType: 'application/pdf', upsert: false })
+  expect(calls.find((c) => c.table === 'books' && c.method === 'update')!.args[0]).toEqual({ file_path: up.args[0] })
+  expect(calls).toContainEqual({ table: 'storage:books', method: 'remove', args: [['carnegie/antigo.pdf']] })
+})
+
+test('arquivo que não é PDF ou passa de 50 MB nem chega ao Storage', async () => {
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useUploadBook(), { wrapper: Wrapper })
+  await act(async () => { await expect(result.current.mutateAsync({ bookId: 'carnegie', file: pdf(10, 'image/png'), previousPath: null })).rejects.toThrow(/PDF/) })
+  const big = { name: 'g.pdf', type: 'application/pdf', size: 51 * 1024 * 1024 } as File
+  await act(async () => { await expect(result.current.mutateAsync({ bookId: 'carnegie', file: big, previousPath: null })).rejects.toThrow(/50 MB/) })
+  expect(calls).toHaveLength(0)
+})
+
+test('aluna tentando subir: Storage recusa com mensagem clara e nada fica órfão', async () => {
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useUploadBook(), { wrapper: Wrapper })
+  results['storage:upload'] = [{ data: null, error: { message: 'new row violates row-level security policy', statusCode: '403' } }]
+  await act(async () => { await expect(result.current.mutateAsync({ bookId: 'carnegie', file: pdf(), previousPath: null })).rejects.toThrow('Só o mentor altera os materiais da biblioteca.') })
+  expect(calls.some((c) => c.method === 'remove')).toBe(false)
+})
+
+test('se a linha do livro não atualiza, o arquivo recém-enviado é removido', async () => {
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useUploadBook(), { wrapper: Wrapper })
+  results.books = [{ data: [], error: null }]
+  await act(async () => { await expect(result.current.mutateAsync({ bookId: 'carnegie', file: pdf(), previousPath: 'carnegie/antigo.pdf' })).rejects.toThrow(/Só o mentor/) })
+  const removes = calls.filter((c) => c.method === 'remove')
+  expect(removes).toHaveLength(1)
+  expect((removes[0].args[0] as string[])[0]).toMatch(/^carnegie\/\d+\.pdf$/) // o novo, nunca o antigo
+})
+
+test('remover PDF: limpa a linha e apaga o objeto', async () => {
+  results.books = [{ data: [{ id: 'carnegie' }], error: null }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useRemoveBookFile(), { wrapper: Wrapper })
+  await act(async () => { await result.current.mutateAsync({ bookId: 'carnegie', filePath: 'carnegie/1.pdf' }) })
+  expect(calls.find((c) => c.table === 'books' && c.method === 'update')!.args[0]).toEqual({ file_path: null })
+  expect(calls).toContainEqual({ table: 'storage:books', method: 'remove', args: [['carnegie/1.pdf']] })
+})
+
+test('link externo: normaliza, limpa com vazio e recusa esquemas perigosos (RF-62)', async () => {
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useSaveBookLink(), { wrapper: Wrapper })
+  results.books = [{ data: [{ id: 'carnegie' }], error: null }, { data: [{ id: 'carnegie' }], error: null }]
+  await act(async () => { await result.current.mutateAsync({ bookId: 'carnegie', externalUrl: ' https://exemplo.com/a ' }) })
+  await act(async () => { await result.current.mutateAsync({ bookId: 'carnegie', externalUrl: '  ' }) })
+  const sent = calls.filter((c) => c.method === 'update').map((c) => (c.args[0] as { external_url: string | null }).external_url)
+  expect(sent).toEqual(['https://exemplo.com/a', null])
+  await act(async () => { await expect(result.current.mutateAsync({ bookId: 'carnegie', externalUrl: 'javascript:alert(1)' })).rejects.toThrow(/http/) })
+})
+```
+
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/features/library/hooks.test.tsx 2>&1 | tail -10`
+Expected: FAIL — `useBooks: implementado na Task 37`.
+
+- [ ] **Step 3: Implementar**
+
+
+`src/features/library/hooks.ts`:
+```ts
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { bookFilePath, clampPage, normalizeExternalUrl, validatePdfFile } from '@/domain/library'
+import { fail } from '@/lib/db'
+import { supabase } from '@/lib/supabase'
+import type { Book, BookProgress, RemoveBookFileVars, SaveBookLinkVars, SaveProgressVars, UploadBookVars } from './types'
+
+const BOOKS = ['books'] as const
+const ONLY_MENTOR = 'Só o mentor altera os materiais da biblioteca.'
+
+interface ProgressRow { page: number; total_pages: number | null; updated_at: string }
+interface Row {
+  id: string; order: number; title: string; author: string | null; phase: string; kind: 'livro' | 'curso'
+  file_path: string | null; external_url: string | null; book_progress: ProgressRow | ProgressRow[] | null
+}
+
+/** RF-60: os materiais na ordem da trilha, cada um com a última página lida. */
+export function useBooks() {
+  return useQuery({
+    queryKey: BOOKS,
+    queryFn: async (): Promise<Book[]> => {
+      const { data, error } = await supabase.from('books')
+        .select('id, order, title, author, phase, kind, file_path, external_url, book_progress(page, total_pages, updated_at)')
+        .order('order')
+      if (error) throw error
+      return (data as unknown as Row[]).map((r) => {
+        const p = Array.isArray(r.book_progress) ? r.book_progress[0] : r.book_progress
+        return {
+          id: r.id, order: r.order, title: r.title, author: r.author, phase: r.phase, kind: r.kind,
+          filePath: r.file_path, externalUrl: r.external_url,
+          progress: p ? { page: p.page, totalPages: p.total_pages, updatedAt: p.updated_at } : null,
+        }
+      })
+    },
+  })
+}
+
+/** RF-65: URL assinada de 1 h; nenhum PDF é público. */
+export function useBookUrl(filePath: string | null) {
+  return useQuery({
+    queryKey: ['book_url', filePath],
+    enabled: filePath !== null,
+    staleTime: 50 * 60_000,
+    queryFn: async (): Promise<string> => {
+      const { data, error } = await supabase.storage.from('books').createSignedUrl(filePath!, 3600)
+      if (error) throw error
+      return data.signedUrl
+    },
+  })
+}
+
+/** RF-63: só a aluna grava a página. Atualiza o cache sem recarregar a lista a cada virada de página. */
+export function useSaveBookProgress() {
+  const qc = useQueryClient()
+  return useMutation<void, Error, SaveProgressVars>({
+    mutationFn: async ({ bookId, page, totalPages }) => {
+      const safe = clampPage(page, totalPages)
+      const { error } = await supabase.from('book_progress').upsert({ book_id: bookId, page: safe, total_pages: totalPages }, { onConflict: 'book_id' })
+      if (error) fail(error, { '42501': 'Só a aluna salva a página de leitura.' })
+    },
+    onSuccess: (_d, { bookId, page, totalPages }) => {
+      const progress: BookProgress = { page: clampPage(page, totalPages), totalPages, updatedAt: new Date().toISOString() }
+      qc.setQueryData<Book[]>(BOOKS, (old) => old?.map((b) => (b.id === bookId ? { ...b, progress } : b)))
+    },
+  })
+}
+
+/** RF-61: só o mentor, só PDF, até 50 MB. Sobe com nome novo, aponta o livro para ele e só então apaga o arquivo anterior. */
+export function useUploadBook() {
+  const qc = useQueryClient()
+  return useMutation<void, Error, UploadBookVars>({
+    mutationFn: async ({ bookId, file, previousPath }) => {
+      const problem = validatePdfFile(file)
+      if (problem) throw new Error(problem)
+      const path = bookFilePath(bookId, Date.now())
+      const up = await supabase.storage.from('books').upload(path, file, { contentType: 'application/pdf', upsert: false })
+      if (up.error) fail(up.error, { 'row-level security': ONLY_MENTOR })
+      const row = await supabase.from('books').update({ file_path: path }).eq('id', bookId).select('id')
+      if (row.error || !row.data || row.data.length === 0) {
+        await supabase.storage.from('books').remove([path])
+        if (row.error) fail(row.error)
+        throw new Error(ONLY_MENTOR)
+      }
+      if (previousPath) await supabase.storage.from('books').remove([previousPath])
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: BOOKS }),
+  })
+}
+
+export function useRemoveBookFile() {
+  const qc = useQueryClient()
+  return useMutation<void, Error, RemoveBookFileVars>({
+    mutationFn: async ({ bookId, filePath }) => {
+      const row = await supabase.from('books').update({ file_path: null }).eq('id', bookId).select('id')
+      if (row.error) throw row.error
+      if (!row.data || row.data.length === 0) throw new Error(ONLY_MENTOR)
+      await supabase.storage.from('books').remove([filePath])
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: BOOKS }),
+  })
+}
+
+/** RF-62: link externo opcional (compra ou audiolivro); `null` limpa. */
+export function useSaveBookLink() {
+  const qc = useQueryClient()
+  return useMutation<void, Error, SaveBookLinkVars>({
+    mutationFn: async ({ bookId, externalUrl }) => {
+      const url = externalUrl === null || externalUrl.trim() === '' ? null : normalizeExternalUrl(externalUrl)
+      if (externalUrl !== null && externalUrl.trim() !== '' && url === null) throw new Error('Use um link que comece com http:// ou https://.')
+      const { data, error } = await supabase.from('books').update({ external_url: url }).eq('id', bookId).select('id')
+      if (error) throw error
+      if (!data || data.length === 0) throw new Error(ONLY_MENTOR)
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: BOOKS }),
+  })
+}
+```
+
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npx vitest run src/features/library 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS; `tsc` sem erros.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/features/library/hooks.ts src/features/library/hooks.test.tsx
+git commit -m "feat(library): supabase hooks for books, reading progress and pdf upload"
+```
+
+---
+### Task 38: ChecklistsScreen e ChecklistEditor — **[W4]**
+
+**Files:**
+
+- Create: `src/features/checklists/ChecklistEditor.tsx`
+- Create: `src/features/checklists/ChecklistsScreen.tsx`
+- Test: `src/features/checklists/ChecklistsScreen.test.tsx`
+
+**Interfaces:**
+- Consumes: `useChecklists`, `useSaveChecklist`, `useToggleChecklistItem`, `useDeleteChecklist` (mockados a partir da Task 33); `validateChecklistDraft`, `checklistProgress` (Task 33); `NODES`; `useAuth`; `Badge`, `Button`, `Card`, `Checkbox`, `ProgressBar`; `crypto.randomUUID()`.
+- Produces: `ChecklistsScreen()` (sem props; aba "Listas" em `/caderno/checklists`) e `ChecklistEditor({ initial?, onDone })`. RF-42: título, itens, semana opcional (as 16 semanas) e data opcional; cada pessoa edita e apaga só as próprias listas (a outra vê em só leitura, com "Lista da aluna" / "Lista do mentor"); marcar item é imediato; "Apagar" pede confirmação. Os ids da lista e dos itens nascem no cliente e os itens que ficam mantêm o id ao editar (a marcação deles é preservada).
+
+
+- [ ] **Step 1: Testes**
+
+`src/features/checklists/ChecklistsScreen.test.tsx`:
+```tsx
+import { render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { asyncMutationOf, checklistOf, queryOf } from '@/test/e6Mocks'
+
+vi.mock('@/lib/supabase', () => ({ supabase: {} }))
+vi.mock('@/features/auth/AuthProvider', () => ({ useAuth: vi.fn() }))
+vi.mock('./hooks')
+
+import { useAuth } from '@/features/auth/AuthProvider'
+import { ChecklistsScreen } from './ChecklistsScreen'
+import * as api from './hooks'
+
+const toggle = vi.fn()
+const save = vi.fn()
+const remove = vi.fn()
+
+function setup(lists = [checklistOf()], role: 'aluna' | 'mentor' = 'aluna') {
+  vi.mocked(useAuth).mockReturnValue({ profile: { id: 'u', role, name: 'X' } } as never)
+  vi.mocked(api.useChecklists).mockReturnValue(queryOf(lists))
+  vi.mocked(api.useToggleChecklistItem).mockReturnValue({ ...(asyncMutationOf() as object), mutate: toggle } as never)
+  vi.mocked(api.useSaveChecklist).mockReturnValue({ ...(asyncMutationOf() as object), mutate: save } as never)
+  vi.mocked(api.useDeleteChecklist).mockReturnValue({ ...(asyncMutationOf() as object), mutate: remove } as never)
+  return render(<ChecklistsScreen />)
+}
+
+beforeEach(() => vi.clearAllMocks())
+
+test('mostra a lista com semana, progresso e itens marcados', () => {
+  setup()
+  expect(screen.getByRole('heading', { name: 'Semana 5' })).toBeInTheDocument()
+  expect(screen.getByText('Semana 5', { selector: 'span' })).toBeInTheDocument()
+  expect(screen.getByRole('checkbox', { name: 'Ligar para 5 empresas' })).toBeChecked()
+  expect(screen.getByRole('checkbox', { name: 'Escrever 10 respostas' })).not.toBeChecked()
+})
+
+test('marcar um item chama a mutation', async () => {
+  setup()
+  await userEvent.click(screen.getByRole('checkbox', { name: 'Escrever 10 respostas' }))
+  expect(toggle).toHaveBeenCalledWith({ itemId: 'i2', done: true })
+})
+
+test('lista da outra pessoa é só leitura, com o nome de quem é', () => {
+  setup([checklistOf({ mine: false })], 'mentor')
+  expect(screen.getByText('Lista da aluna')).toBeInTheDocument()
+  expect(screen.getByRole('checkbox', { name: 'Escrever 10 respostas' })).toBeDisabled()
+  expect(screen.queryByRole('button', { name: /Editar/ })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /Apagar/ })).not.toBeInTheDocument()
+})
+
+test('nova lista: título, itens, semana e data; só salva quando válida (RF-42)', async () => {
+  setup([])
+  await userEvent.click(screen.getByRole('button', { name: 'Nova lista' }))
+  const saveButton = screen.getByRole('button', { name: 'Salvar lista' })
+  expect(saveButton).toBeDisabled()
+  await userEvent.type(screen.getByLabelText('Título'), 'Preparar a semana')
+  expect(saveButton).toBeDisabled() // item vazio
+  await userEvent.type(screen.getByLabelText('Item 1'), 'Ler o capítulo 3')
+  await userEvent.click(screen.getByRole('button', { name: 'Adicionar item' }))
+  await userEvent.type(screen.getByLabelText('Item 2'), 'Ligar para 3 empresas')
+  await userEvent.selectOptions(screen.getByLabelText('Semana (opcional)'), 'w05')
+  await userEvent.type(screen.getByLabelText('Data (opcional)'), '2026-10-04')
+  expect(saveButton).toBeEnabled()
+  await userEvent.click(saveButton)
+  const vars = save.mock.calls[0][0]
+  expect(vars).toMatchObject({ title: 'Preparar a semana', weekId: 'w05', dueDate: '2026-10-04' })
+  expect(vars.id).toEqual(expect.any(String))
+  expect(vars.items.map((i: { text: string }) => i.text)).toEqual(['Ler o capítulo 3', 'Ligar para 3 empresas'])
+  expect(new Set(vars.items.map((i: { id: string }) => i.id)).size).toBe(2)
+})
+
+test('editar preserva os ids dos itens e remover tira o item', async () => {
+  setup()
+  await userEvent.click(screen.getByRole('button', { name: 'Editar Semana 5' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Remover item 2' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Salvar lista' }))
+  expect(save.mock.calls[0][0]).toMatchObject({ id: 'c1', items: [{ id: 'i1', text: 'Ligar para 5 empresas' }] })
+})
+
+test('apagar pede confirmação', async () => {
+  setup()
+  await userEvent.click(screen.getByRole('button', { name: 'Apagar Semana 5' }))
+  expect(remove).not.toHaveBeenCalled()
+  await userEvent.click(screen.getByRole('button', { name: 'Confirmar exclusão' }))
+  expect(remove).toHaveBeenCalledWith('c1')
+})
+
+test('sem listas mostra a mensagem', () => {
+  setup([])
+  expect(within(document.body).getByText('Nenhuma lista ainda.')).toBeInTheDocument()
+})
+```
+
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/features/checklists 2>&1 | tail -10`
+Expected: FAIL — `Failed to resolve import` do componente ainda inexistente.
+
+- [ ] **Step 3: Implementar**
+
+`src/features/checklists/ChecklistEditor.tsx`:
+```tsx
+import { useState } from 'react'
+import { Button, Card } from '@/design/ui'
+import { NODES } from '@/content/trail'
+import { validateChecklistDraft } from '@/domain/checklists'
+import { useSaveChecklist } from './hooks'
+import type { Checklist } from './types'
+
+const WEEKS = NODES.filter((n) => n.week !== undefined)
+const inputClass = 'h-12 rounded-control border-2 border-line bg-surface px-3 font-normal focus:border-brand focus:outline-none'
+
+/** Cria ou edita uma lista (RF-42): título, itens, semana e data opcionais. Os ids nascem aqui, então salvar de novo é seguro. */
+export function ChecklistEditor({ initial, onDone }: { initial?: Checklist; onDone(): void }) {
+  const save = useSaveChecklist()
+  const [id] = useState(() => initial?.id ?? crypto.randomUUID())
+  const [title, setTitle] = useState(initial?.title ?? '')
+  const [weekId, setWeekId] = useState(initial?.weekId ?? '')
+  const [dueDate, setDueDate] = useState(initial?.dueDate ?? '')
+  const [items, setItems] = useState<{ id: string; text: string }[]>(
+    initial?.items.map((i) => ({ id: i.id, text: i.text })) ?? [{ id: crypto.randomUUID(), text: '' }],
+  )
+
+  const draft = { title, weekId: weekId || null, dueDate: dueDate || null, items }
+  const problem = validateChecklistDraft(draft)
+  const setText = (itemId: string, text: string) => setItems((xs) => xs.map((x) => (x.id === itemId ? { ...x, text } : x)))
+
+  return (
+    <Card className="flex flex-col gap-4">
+      <h2 className="font-display text-2xl font-black">{initial ? 'Editar lista' : 'Nova lista'}</h2>
+      <label className="flex flex-col gap-1 font-bold">Título
+        <input value={title} onChange={(e) => setTitle(e.target.value)} className={inputClass} />
+      </label>
+      <div className="flex flex-wrap gap-4">
+        <label className="flex flex-col gap-1 font-bold">Semana (opcional)
+          <select value={weekId} onChange={(e) => setWeekId(e.target.value)} className={inputClass}>
+            <option value="">Nenhuma</option>
+            {WEEKS.map((w) => <option key={w.id} value={w.id}>Semana {w.week}: {w.title}</option>)}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 font-bold">Data (opcional)
+          <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} className={inputClass} />
+        </label>
+      </div>
+
+      <fieldset className="flex flex-col gap-2">
+        <legend className="font-bold">Itens</legend>
+        {items.map((it, n) => (
+          <div key={it.id} className="flex gap-2">
+            <input aria-label={`Item ${n + 1}`} value={it.text} onChange={(e) => setText(it.id, e.target.value)} className={`${inputClass} flex-1`} />
+            <Button variant="ghost" size="sm" aria-label={`Remover item ${n + 1}`} onClick={() => setItems((xs) => xs.filter((x) => x.id !== it.id))}>Remover</Button>
+          </div>
+        ))}
+        <Button variant="secondary" size="sm" onClick={() => setItems((xs) => [...xs, { id: crypto.randomUUID(), text: '' }])}>Adicionar item</Button>
+      </fieldset>
+
+      {problem && title !== '' && <p aria-live="polite" className="text-sm text-muted">{problem}</p>}
+      {save.error && <p role="alert" className="text-danger">{save.error.message}</p>}
+      <div className="flex gap-2">
+        <Button disabled={problem !== null} loading={save.isPending} onClick={() => save.mutate({ id, ...draft }, { onSuccess: onDone })}>Salvar lista</Button>
+        <Button variant="ghost" onClick={onDone}>Cancelar</Button>
+      </div>
+    </Card>
+  )
+}
+```
+
+`src/features/checklists/ChecklistsScreen.tsx`:
+```tsx
+import { useState } from 'react'
+import { Badge, Button, Card, Checkbox, ProgressBar } from '@/design/ui'
+import { NODES } from '@/content/trail'
+import { checklistProgress } from '@/domain/checklists'
+import { useAuth } from '@/features/auth/AuthProvider'
+import { ChecklistEditor } from './ChecklistEditor'
+import { useChecklists, useDeleteChecklist, useToggleChecklistItem } from './hooks'
+import type { Checklist } from './types'
+
+const dueFormat = new Intl.DateTimeFormat('pt-BR', { timeZone: 'UTC', day: '2-digit', month: '2-digit' })
+
+/** `/caderno/checklists` (RF-42): listas manuais das duas contas; cada uma edita só as suas. */
+export function ChecklistsScreen() {
+  const { profile } = useAuth()
+  const otherName = profile?.role === 'mentor' ? 'Lista da aluna' : 'Lista do mentor'
+  const lists = useChecklists()
+  const toggle = useToggleChecklistItem()
+  const remove = useDeleteChecklist()
+  const [editing, setEditing] = useState<Checklist | 'new' | null>(null)
+  const [confirming, setConfirming] = useState<string | null>(null)
+
+  if (lists.isLoading) return <p role="status" className="p-6 text-muted">Carregando as listas…</p>
+  if (!lists.data) return <p role="alert" className="p-6 text-danger">Não foi possível carregar as listas.</p>
+
+  return (
+    <div className="flex flex-col gap-4">
+      {editing ? (
+        <ChecklistEditor key={editing === 'new' ? 'new' : editing.id} initial={editing === 'new' ? undefined : editing} onDone={() => setEditing(null)} />
+      ) : (
+        <Button variant="secondary" onClick={() => setEditing('new')}>Nova lista</Button>
+      )}
+      {lists.data.length === 0 && <p className="text-muted">Nenhuma lista ainda.</p>}
+      {toggle.error && <p role="alert" className="text-danger">{toggle.error.message}</p>}
+      {remove.error && <p role="alert" className="text-danger">{remove.error.message}</p>}
+      {lists.data.map((l) => {
+        const p = checklistProgress(l.items)
+        const week = NODES.find((n) => n.id === l.weekId)
+        return (
+          <Card key={l.id} className="flex flex-col gap-3">
+            <header className="flex flex-wrap items-center gap-2">
+              <h2 className="font-bold">{l.title}</h2>
+              {!l.mine && <Badge tone="muted">{otherName}</Badge>}
+              {week?.week !== undefined && <Badge tone="brand">Semana {week.week}</Badge>}
+              {l.dueDate && <Badge tone="streak">Até {dueFormat.format(new Date(`${l.dueDate}T12:00:00Z`))}</Badge>}
+            </header>
+            <ProgressBar value={p.ratio} label={`${l.title}: ${p.done} de ${p.total}`} />
+            <ul className="flex flex-col gap-1">
+              {l.items.map((i) => (
+                <li key={i.id}>
+                  <Checkbox checked={i.done} label={i.text} disabled={!l.mine} onChange={(done) => toggle.mutate({ itemId: i.id, done })} />
+                </li>
+              ))}
+            </ul>
+            {l.mine && (
+              <div className="flex gap-2">
+                <Button size="sm" variant="secondary" onClick={() => setEditing(l)}>Editar {l.title}</Button>
+                {confirming === l.id
+                  ? <Button size="sm" variant="danger" onClick={() => { remove.mutate(l.id); setConfirming(null) }}>Confirmar exclusão</Button>
+                  : <Button size="sm" variant="ghost" onClick={() => setConfirming(l.id)}>Apagar {l.title}</Button>}
+              </div>
+            )}
+          </Card>
+        )
+      })}
+    </div>
+  )
+}
+```
+
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npx vitest run src/features/checklists 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS; `tsc` sem erros.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/features/checklists/ChecklistEditor.tsx src/features/checklists/ChecklistsScreen.tsx src/features/checklists/ChecklistsScreen.test.tsx
+git commit -m "feat(checklists): manual checklists screen and editor"
+```
+
+---
+
+### Task 39: PdfReader — **[W4]**
+
+**Files:**
+- Create: `src/features/library/pdfWorker.ts`, `src/features/library/PdfReader.tsx`
+- Modify: `package.json`, `package-lock.json` (só esta Task mexe neles)
+- Test: `src/features/library/PdfReader.test.tsx`
+
+**Interfaces:**
+- Consumes: `react-pdf` (`Document`, `Page`, `pdfjs`); `clampPage` (Task 33); `Button`.
+- Produces: `PdfReader({ url, initialPage, onPageChange? })` com `onPageChange(page, total)`: abre na página pedida (ajustada ao tamanho real do PDF, Review Focus 4), "Página anterior" / "Próxima página", campo "Ir para a página" (vale com Enter ou ao sair do campo), "de N", alerta legível se o PDF não abre; chama `onPageChange` ao abrir e a cada troca. `src/features/library/pdfWorker.ts` só configura o worker do PDF.js (efeito colateral do import).
+
+- [ ] **Step 1: Instalar a dependência e conferir o worker**
+
+Run: `npm i react-pdf@^11 2>&1 | tail -2 && ls node_modules/pdfjs-dist/build/pdf.worker.min.mjs`
+Expected: `react-pdf` em `dependencies`; o arquivo do worker existe (a Task usa `new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url)`; se o gerenciador de pacotes não deixar `pdfjs-dist` acessível na raiz, acrescente `pdfjs-dist` às dependências com a mesma versão que o `react-pdf` pede).
+
+- [ ] **Step 2: Testes (o `react-pdf` é simulado; o navegador de verdade é conferido na Task 43)**
+
+
+`src/features/library/PdfReader.test.tsx`:
+```tsx
+import type { ReactNode } from 'react'
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+
+const pdfState = vi.hoisted(() => ({ numPages: 10, fail: false }))
+vi.mock('react-pdf', async () => {
+  const { useEffect } = await import('react')
+  return {
+    pdfjs: { GlobalWorkerOptions: {} },
+    Document: ({ children, onLoadSuccess, onLoadError }: { children: ReactNode; onLoadSuccess: (d: { numPages: number }) => void; onLoadError: () => void }) => {
+      useEffect(() => { if (pdfState.fail) onLoadError(); else onLoadSuccess({ numPages: pdfState.numPages }) }, [onLoadSuccess, onLoadError])
+      return pdfState.fail ? null : <div data-testid="document">{children}</div>
+    },
+    Page: ({ pageNumber }: { pageNumber: number }) => <div data-testid="page">página {pageNumber}</div>,
+  }
+})
+
+import { PdfReader } from './PdfReader'
+
+beforeEach(() => { pdfState.numPages = 10; pdfState.fail = false })
+
+test('abre na última página lida e avisa o total (RF-63)', async () => {
+  const onPageChange = vi.fn()
+  render(<PdfReader url="https://signed.test/a.pdf" initialPage={4} onPageChange={onPageChange} />)
+  expect(await screen.findByText('página 4')).toBeInTheDocument()
+  await waitFor(() => expect(onPageChange).toHaveBeenCalledWith(4, 10))
+  expect(screen.getByText('de 10')).toBeInTheDocument()
+})
+
+test('PDF trocado por um menor: a página salva é ajustada ao novo total (Review Focus 4)', async () => {
+  pdfState.numPages = 6
+  const onPageChange = vi.fn()
+  render(<PdfReader url="u" initialPage={80} onPageChange={onPageChange} />)
+  expect(await screen.findByText('página 6')).toBeInTheDocument()
+  expect(onPageChange).toHaveBeenLastCalledWith(6, 6)
+})
+
+test('próxima e anterior respeitam os limites e avisam a cada troca', async () => {
+  const onPageChange = vi.fn()
+  render(<PdfReader url="u" initialPage={1} onPageChange={onPageChange} />)
+  await screen.findByText('página 1')
+  const prev = screen.getByRole('button', { name: 'Página anterior' })
+  const next = screen.getByRole('button', { name: 'Próxima página' })
+  expect(prev).toBeDisabled()
+  await userEvent.click(next)
+  expect(screen.getByText('página 2')).toBeInTheDocument()
+  expect(onPageChange).toHaveBeenLastCalledWith(2, 10)
+  await userEvent.click(prev)
+  expect(screen.getByText('página 1')).toBeInTheDocument()
+})
+
+test('ir direto para uma página, com limite no total', async () => {
+  render(<PdfReader url="u" initialPage={1} />)
+  await screen.findByText('página 1')
+  const input = screen.getByLabelText('Ir para a página')
+  await userEvent.clear(input)
+  await userEvent.type(input, '7{Enter}')
+  expect(screen.getByText('página 7')).toBeInTheDocument()
+  await userEvent.clear(input)
+  await userEvent.type(input, '99{Enter}')
+  expect(screen.getByText('página 10')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Próxima página' })).toBeDisabled()
+})
+
+test('falha ao abrir mostra alerta legível', async () => {
+  pdfState.fail = true
+  render(<PdfReader url="u" initialPage={1} />)
+  expect(await screen.findByRole('alert')).toHaveTextContent('Não foi possível abrir o PDF')
+})
+```
+
+
+- [ ] **Step 3: Rodar e ver falhar**
+
+Run: `npx vitest run src/features/library/PdfReader.test.tsx 2>&1 | tail -10`
+Expected: FAIL — `Failed to resolve import "./PdfReader"`.
+
+- [ ] **Step 4: Implementar**
+
+
+`src/features/library/pdfWorker.ts`:
+```ts
+import { pdfjs } from 'react-pdf'
+
+// Vite copia o worker do PDF.js para o build e devolve a URL final.
+pdfjs.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString()
+```
+
+`src/features/library/PdfReader.tsx`:
+```tsx
+import { useEffect, useRef, useState } from 'react'
+import { Document, Page } from 'react-pdf'
+import { Button } from '@/design/ui'
+import { clampPage } from '@/domain/library'
+import './pdfWorker'
+
+export interface PdfReaderProps {
+  /** URL assinada do PDF (RF-65). */
+  url: string
+  /** Última página lida (RF-63); o leitor a ajusta ao tamanho real do PDF. */
+  initialPage: number
+  /** Chamado ao abrir e a cada troca de página. */
+  onPageChange?: (page: number, total: number) => void
+}
+
+/** Leitor de PDF embutido (PDF.js via react-pdf), que abre na última página lida. Camadas de texto e de anotação desligadas: só a imagem da página. */
+export function PdfReader({ url, initialPage, onPageChange }: PdfReaderProps) {
+  const [total, setTotal] = useState<number | null>(null)
+  const [page, setPage] = useState(() => clampPage(initialPage, null))
+  const [typed, setTyped] = useState<string | null>(null)
+  const [failed, setFailed] = useState(false)
+  const [width, setWidth] = useState(360)
+  const box = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const el = box.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(([entry]) => setWidth(Math.max(240, Math.floor(entry.contentRect.width))))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  function go(next: number) {
+    const safe = clampPage(next, total)
+    setPage(safe)
+    if (total !== null) onPageChange?.(safe, total)
+  }
+
+  // O número digitado só vale ao dar Enter ou sair do campo; digitar "17" não passa por "1" nem "7".
+  function commitTyped() {
+    if (typed !== null && typed !== '') go(Number(typed))
+    setTyped(null)
+  }
+
+  return (
+    <div ref={box} className="flex w-full flex-col gap-3">
+      {failed ? (
+        <p role="alert" className="text-danger">Não foi possível abrir o PDF. Recarregue a página ou peça ao mentor para enviar de novo.</p>
+      ) : (
+        <Document
+          file={url}
+          loading={<p role="status" className="text-muted">Abrindo o PDF…</p>}
+          error={null}
+          onLoadError={() => setFailed(true)}
+          onLoadSuccess={({ numPages }) => {
+            setTotal(numPages)
+            const safe = clampPage(page, numPages)
+            setPage(safe)
+            onPageChange?.(safe, numPages)
+          }}
+        >
+          <Page pageNumber={page} width={Math.min(width, 900)} renderTextLayer={false} renderAnnotationLayer={false} />
+        </Document>
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" variant="secondary" disabled={page <= 1} onClick={() => go(page - 1)}>Página anterior</Button>
+        <label className="flex items-center gap-2 text-sm font-bold">
+          Ir para a página
+          <input type="number" min={1} max={total ?? undefined} value={typed ?? String(page)}
+            onChange={(e) => setTyped(e.target.value)} onBlur={commitTyped}
+            onKeyDown={(e) => { if (e.key === 'Enter') commitTyped() }}
+            className="h-9 w-20 rounded-control border-2 border-line bg-surface px-2 tabular-nums focus:border-brand focus:outline-none" />
+        </label>
+        <span aria-live="polite" className="text-sm text-muted">de {total ?? '…'}</span>
+        <Button size="sm" variant="secondary" disabled={total === null || page >= total} onClick={() => go(page + 1)}>Próxima página</Button>
+      </div>
+    </div>
+  )
+}
+```
+
+
+- [ ] **Step 5: Rodar e ver passar**
+
+Run: `npx vitest run src/features/library/PdfReader.test.tsx 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS; `tsc` sem erros.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add package.json package-lock.json src/features/library/pdfWorker.ts src/features/library/PdfReader.tsx src/features/library/PdfReader.test.tsx
+git commit -m "feat(library): embedded pdf reader that resumes on the last page"
+```
+
+---
+
+### Task 40: LibraryScreen, BookScreen e BookAdmin — **[W4]**
+
+**Files:**
+
+- Create: `src/features/library/BookAdmin.tsx`
+- Create: `src/features/library/LibraryScreen.tsx`
+- Create: `src/features/library/BookScreen.tsx`
+- Test: `src/features/library/LibraryScreen.test.tsx`, `src/features/library/BookScreen.test.tsx`
+
+**Interfaces:**
+- Consumes: `useBooks`, `useBookUrl`, `useSaveBookProgress`, `useUploadBook`, `useRemoveBookFile`, `useSaveBookLink` (mockados a partir da Task 33); `PdfReader` (Task 39); `phaseLabel`, `MAX_PDF_BYTES` (Task 33); `useDebounced` (Task 35); `useAuth`; `Badge`, `Button`, `Card`, `ProgressBar`.
+- Produces: `LibraryScreen()` (`/biblioteca`, RF-60/64): materiais na ordem da trilha com tipo, fase e página lida; curso abre por link externo; livro sem PDF mostra "PDF ainda não disponível". `BookScreen()` (`/biblioteca/:bookId`): leitor na última página lida (RF-63); a página só é gravada pela aluna, depois de 1 s parada; sem PDF, aviso e link externo opcional (RF-62); "Material não encontrado". `BookAdmin({ book })` (só o mentor, RF-61/62): enviar ou trocar o PDF (até 50 MB, só PDF), remover com confirmação e guardar o link externo; erros do envio aparecem como alerta. O leitor entra por `lazy` na Task 43.
+
+
+- [ ] **Step 1: Testes**
+
+`src/features/library/LibraryScreen.test.tsx`:
+```tsx
+import { render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router'
+import { bookOf, courseOf, queryOf } from '@/test/e6Mocks'
+
+vi.mock('@/lib/supabase', () => ({ supabase: {} }))
+vi.mock('./hooks')
+
+import * as api from './hooks'
+import { LibraryScreen } from './LibraryScreen'
+
+function setup(books = [bookOf(), courseOf()]) {
+  vi.mocked(api.useBooks).mockReturnValue(queryOf(books))
+  return render(<MemoryRouter><LibraryScreen /></MemoryRouter>)
+}
+
+test('lista os materiais com tipo e fase (RF-60)', () => {
+  setup()
+  expect(screen.getByText('Como Fazer Amigos e Influenciar Pessoas')).toBeInTheDocument()
+  expect(screen.getByText('Livro')).toBeInTheDocument()
+  expect(screen.getByText('Curso')).toBeInTheDocument()
+  expect(screen.getByText('Fase 1')).toBeInTheDocument()
+  expect(screen.getByText('Fases 2 e 3')).toBeInTheDocument()
+})
+
+test('livro sem PDF mostra "PDF ainda não disponível" (RF-62)', () => {
+  setup([bookOf()])
+  expect(screen.getByText('PDF ainda não disponível')).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Ver detalhes' })).toHaveAttribute('href', '/biblioteca/carnegie')
+})
+
+test('livro com PDF e progresso oferece continuar na página lida', () => {
+  setup([bookOf({ filePath: 'carnegie/1.pdf', progress: { page: 12, totalPages: 200, updatedAt: 'x' } })])
+  expect(screen.getByRole('link', { name: 'Continuar na página 12' })).toBeInTheDocument()
+  expect(screen.getByRole('progressbar', { name: /página 12 de 200/ })).toBeInTheDocument()
+  expect(screen.queryByText('PDF ainda não disponível')).not.toBeInTheDocument()
+})
+
+test('curso abre por link externo em nova aba (RF-64)', () => {
+  setup([courseOf()])
+  const link = screen.getByRole('link', { name: 'Abrir curso' })
+  expect(link).toHaveAttribute('href', 'https://loja.sebrae.com.br/cursos/cursos-online')
+  expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+})
+```
+
+`src/features/library/BookScreen.test.tsx`:
+```tsx
+import { act, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { MemoryRouter, Route, Routes } from 'react-router'
+import { asyncMutationOf, bookOf, courseOf, queryOf } from '@/test/e6Mocks'
+import type { Book } from './types'
+
+vi.mock('@/lib/supabase', () => ({ supabase: {} }))
+vi.mock('@/features/auth/AuthProvider', () => ({ useAuth: vi.fn() }))
+vi.mock('./hooks')
+vi.mock('./PdfReader', () => ({
+  PdfReader: ({ url, initialPage, onPageChange }: { url: string; initialPage: number; onPageChange: (p: number, t: number) => void }) => (
+    <div>
+      <p>leitor {url} na página {initialPage}</p>
+      <button onClick={() => onPageChange(9, 200)}>virar para 9</button>
+    </div>
+  ),
+}))
+
+import { useAuth } from '@/features/auth/AuthProvider'
+import { BookScreen } from './BookScreen'
+import * as api from './hooks'
+
+const saveProgress = vi.fn()
+const upload = vi.fn()
+const saveLink = vi.fn()
+
+function setup(book: Book, role: 'aluna' | 'mentor' = 'aluna') {
+  vi.mocked(useAuth).mockReturnValue({ profile: { id: 'u', role, name: 'X' } } as never)
+  vi.mocked(api.useBooks).mockReturnValue(queryOf([book]))
+  vi.mocked(api.useBookUrl).mockReturnValue(queryOf('https://signed.test/carnegie/1.pdf'))
+  vi.mocked(api.useSaveBookProgress).mockReturnValue({ ...(asyncMutationOf() as object), mutate: saveProgress } as never)
+  vi.mocked(api.useUploadBook).mockReturnValue({ ...(asyncMutationOf() as object), mutate: upload } as never)
+  vi.mocked(api.useRemoveBookFile).mockReturnValue(asyncMutationOf())
+  vi.mocked(api.useSaveBookLink).mockReturnValue({ ...(asyncMutationOf() as object), mutate: saveLink } as never)
+  return render(<MemoryRouter initialEntries={[`/biblioteca/${book.id}`]}><Routes><Route path="/biblioteca/:bookId" element={<BookScreen />} /></Routes></MemoryRouter>)
+}
+
+beforeEach(() => { vi.clearAllMocks(); vi.useFakeTimers({ shouldAdvanceTime: true }) })
+afterEach(() => vi.useRealTimers())
+
+test('abre o leitor na última página lida', () => {
+  setup(bookOf({ filePath: 'carnegie/1.pdf', progress: { page: 12, totalPages: 200, updatedAt: 'x' } }))
+  expect(screen.getByText('leitor https://signed.test/carnegie/1.pdf na página 12')).toBeInTheDocument()
+})
+
+test('aluna: a página é gravada depois de 1 s parada, não a cada virada (RF-63)', async () => {
+  setup(bookOf({ filePath: 'carnegie/1.pdf', progress: { page: 12, totalPages: 200, updatedAt: 'x' } }))
+  await userEvent.setup({ advanceTimers: vi.advanceTimersByTime }).click(screen.getByRole('button', { name: 'virar para 9' }))
+  expect(saveProgress).not.toHaveBeenCalled()
+  await act(async () => { await vi.advanceTimersByTimeAsync(1100) })
+  expect(saveProgress).toHaveBeenCalledWith({ bookId: 'carnegie', page: 9, totalPages: 200 })
+})
+
+test('mentor lê, mas não grava a página', async () => {
+  setup(bookOf({ filePath: 'carnegie/1.pdf', progress: null }), 'mentor')
+  await userEvent.setup({ advanceTimers: vi.advanceTimersByTime }).click(screen.getByRole('button', { name: 'virar para 9' }))
+  await act(async () => { await vi.advanceTimersByTimeAsync(1500) })
+  expect(saveProgress).not.toHaveBeenCalled()
+})
+
+test('sem PDF: aviso e link externo opcional; aluna não vê a administração (RF-62)', () => {
+  setup(bookOf({ externalUrl: 'https://exemplo.com/audiolivro' }))
+  expect(screen.getByText('PDF ainda não disponível')).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: /Abrir link/ })).toHaveAttribute('href', 'https://exemplo.com/audiolivro')
+  expect(screen.queryByText('Administrar material')).not.toBeInTheDocument()
+})
+
+test('mentor envia o PDF e guarda o link (RF-61/62)', async () => {
+  setup(bookOf({ filePath: 'carnegie/velho.pdf' }), 'mentor')
+  const file = new File(['%PDF-1.4'], 'livro.pdf', { type: 'application/pdf' })
+  await userEvent.setup({ advanceTimers: vi.advanceTimersByTime }).upload(screen.getByLabelText(/Trocar o PDF/), file)
+  expect(upload).toHaveBeenCalledWith({ bookId: 'carnegie', file, previousPath: 'carnegie/velho.pdf' })
+  await userEvent.setup({ advanceTimers: vi.advanceTimersByTime }).type(screen.getByLabelText(/Link externo/), 'https://exemplo.com/compra')
+  await userEvent.setup({ advanceTimers: vi.advanceTimersByTime }).click(screen.getByRole('button', { name: 'Salvar link' }))
+  expect(saveLink).toHaveBeenCalledWith({ bookId: 'carnegie', externalUrl: 'https://exemplo.com/compra' })
+})
+
+test('curso mostra só o link e livro inexistente dá erro', () => {
+  setup(courseOf())
+  expect(screen.getByRole('link', { name: 'Abrir curso' })).toBeInTheDocument()
+  expect(screen.queryByText('PDF ainda não disponível')).not.toBeInTheDocument()
+})
+
+test('material inexistente', () => {
+  vi.mocked(useAuth).mockReturnValue({ profile: { id: 'u', role: 'aluna', name: 'X' } } as never)
+  vi.mocked(api.useBooks).mockReturnValue(queryOf([bookOf()]))
+  render(<MemoryRouter initialEntries={['/biblioteca/nao-existe']}><Routes><Route path="/biblioteca/:bookId" element={<BookScreen />} /></Routes></MemoryRouter>)
+  expect(screen.getByRole('alert')).toHaveTextContent('Material não encontrado')
+})
+```
+
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/features/library 2>&1 | tail -10`
+Expected: FAIL — `Failed to resolve import` do componente ainda inexistente.
+
+- [ ] **Step 3: Implementar**
+
+`src/features/library/BookAdmin.tsx`:
+```tsx
+import { useState } from 'react'
+import { Button, Card } from '@/design/ui'
+import { MAX_PDF_BYTES } from '@/domain/library'
+import { useRemoveBookFile, useSaveBookLink, useUploadBook } from './hooks'
+import type { Book } from './types'
+
+/** Só o mentor vê (RF-61/62): enviar, trocar ou remover o PDF e guardar o link externo. */
+export function BookAdmin({ book }: { book: Book }) {
+  const upload = useUploadBook()
+  const remove = useRemoveBookFile()
+  const saveLink = useSaveBookLink()
+  const [link, setLink] = useState(book.externalUrl ?? '')
+  const [confirming, setConfirming] = useState(false)
+  const maxMb = MAX_PDF_BYTES / (1024 * 1024)
+
+  return (
+    <Card className="flex flex-col gap-4">
+      <h2 className="font-display text-2xl font-black">Administrar material</h2>
+
+      <label className="flex flex-col gap-1 font-bold">
+        {book.filePath ? 'Trocar o PDF' : 'Enviar o PDF'} (até {maxMb} MB)
+        <input type="file" accept="application/pdf" disabled={upload.isPending}
+          onChange={(e) => {
+            const file = e.target.files?.[0]
+            if (file) upload.mutate({ bookId: book.id, file, previousPath: book.filePath })
+            e.target.value = ''
+          }}
+          className="font-normal file:mr-3 file:rounded-control file:border-2 file:border-line file:bg-raised file:px-3 file:py-2 file:font-bold" />
+      </label>
+      {upload.isPending && <p role="status" className="text-muted">Enviando o PDF…</p>}
+      {upload.error && <p role="alert" className="text-danger">{upload.error.message}</p>}
+
+      {book.filePath && (
+        <div className="flex gap-2">
+          {confirming
+            ? <Button variant="danger" size="sm" loading={remove.isPending} onClick={() => { remove.mutate({ bookId: book.id, filePath: book.filePath! }); setConfirming(false) }}>Confirmar remoção</Button>
+            : <Button variant="ghost" size="sm" onClick={() => setConfirming(true)}>Remover PDF</Button>}
+        </div>
+      )}
+      {remove.error && <p role="alert" className="text-danger">{remove.error.message}</p>}
+
+      <form className="flex flex-col gap-2" onSubmit={(e) => { e.preventDefault(); saveLink.mutate({ bookId: book.id, externalUrl: link }) }}>
+        <label className="flex flex-col gap-1 font-bold">Link externo (compra ou audiolivro)
+          <input value={link} onChange={(e) => setLink(e.target.value)} placeholder="https://"
+            className="h-12 rounded-control border-2 border-line bg-surface px-3 font-normal focus:border-brand focus:outline-none" />
+        </label>
+        <Button type="submit" size="sm" variant="secondary" loading={saveLink.isPending}>Salvar link</Button>
+        {saveLink.error && <p role="alert" className="text-danger">{saveLink.error.message}</p>}
+        {saveLink.isSuccess && <p role="status" className="text-sm text-success">Link salvo.</p>}
+      </form>
+    </Card>
+  )
+}
+```
+
+`src/features/library/LibraryScreen.tsx`:
+```tsx
+import { Link } from 'react-router'
+import { Badge, Card, ProgressBar } from '@/design/ui'
+import { phaseLabel } from '@/domain/library'
+import { useBooks } from './hooks'
+
+/** `/biblioteca` (RF-60/64): os materiais na ordem da trilha; cursos abrem por link externo. */
+export function LibraryScreen() {
+  const books = useBooks()
+  if (books.isLoading) return <p role="status" className="p-6 text-muted">Carregando a biblioteca…</p>
+  if (!books.data) return <p role="alert" className="p-6 text-danger">Não foi possível carregar a biblioteca.</p>
+
+  return (
+    <main className="mx-auto flex max-w-md flex-col gap-4 px-4 pt-6 pb-8">
+      <h1 className="font-display text-5xl leading-none font-black text-brand text-glow">Biblioteca</h1>
+      <ul className="flex flex-col gap-3">
+        {books.data.map((b) => {
+          const ratio = b.progress?.totalPages ? b.progress.page / b.progress.totalPages : 0
+          return (
+            <li key={b.id}>
+              <Card className="flex flex-col gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge tone={b.kind === 'livro' ? 'brand' : 'success'}>{b.kind === 'livro' ? 'Livro' : 'Curso'}</Badge>
+                  <Badge tone="muted">{phaseLabel(b.phase)}</Badge>
+                </div>
+                <h2 className="font-bold">{b.title}</h2>
+                {b.author && <p className="text-sm text-muted">{b.author}</p>}
+                {b.kind === 'curso' ? (
+                  b.externalUrl && <a href={b.externalUrl} target="_blank" rel="noopener noreferrer" className="font-bold text-brand underline underline-offset-4">Abrir curso</a>
+                ) : (
+                  <>
+                    {b.progress && b.progress.totalPages && (
+                      <ProgressBar value={ratio} label={`${b.title}: página ${b.progress.page} de ${b.progress.totalPages}`} />
+                    )}
+                    <Link to={`/biblioteca/${b.id}`} className="font-bold text-brand underline underline-offset-4">
+                      {b.filePath ? (b.progress ? `Continuar na página ${b.progress.page}` : 'Ler') : 'Ver detalhes'}
+                    </Link>
+                    {!b.filePath && <p className="text-sm text-muted">PDF ainda não disponível</p>}
+                  </>
+                )}
+              </Card>
+            </li>
+          )
+        })}
+      </ul>
+    </main>
+  )
+}
+```
+
+`src/features/library/BookScreen.tsx`:
+```tsx
+import { useEffect, useState } from 'react'
+import { Link, useParams } from 'react-router'
+import { Badge, Card } from '@/design/ui'
+import { phaseLabel } from '@/domain/library'
+import { useAuth } from '@/features/auth/AuthProvider'
+import { useDebounced } from '@/lib/useDebounced'
+import { BookAdmin } from './BookAdmin'
+import { useBooks, useBookUrl, useSaveBookProgress } from './hooks'
+import { PdfReader } from './PdfReader'
+import type { Book } from './types'
+
+function Reader({ book, role }: { book: Book; role: 'aluna' | 'mentor' }) {
+  const url = useBookUrl(book.filePath)
+  const save = useSaveBookProgress()
+  const [seen, setSeen] = useState<{ page: number; total: number } | null>(null)
+  const settled = useDebounced(seen, 1000)
+  const saved = book.progress?.page
+
+  // RF-63: só a aluna grava a página; espera a leitura assentar (1 s) em vez de gravar a cada virada.
+  useEffect(() => {
+    if (role === 'aluna' && settled && (settled.page !== saved || book.progress?.totalPages !== settled.total)) {
+      save.mutate({ bookId: book.id, page: settled.page, totalPages: settled.total })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settled])
+
+  if (url.isLoading) return <p role="status" className="text-muted">Preparando o PDF…</p>
+  if (!url.data) return <p role="alert" className="text-danger">Não foi possível preparar o PDF.</p>
+  return <PdfReader url={url.data} initialPage={book.progress?.page ?? 1} onPageChange={(page, total) => setSeen({ page, total })} />
+}
+
+/** `/biblioteca/:bookId`: leitor de PDF (RF-63), "PDF ainda não disponível" com link opcional (RF-62) e, para o mentor, a administração. */
+export function BookScreen() {
+  const { bookId } = useParams()
+  const { profile } = useAuth()
+  const role = profile?.role ?? 'aluna'
+  const books = useBooks()
+
+  if (books.isLoading) return <p role="status" className="p-6 text-muted">Carregando…</p>
+  const book = books.data?.find((b) => b.id === bookId)
+  if (!book) return <p role="alert" className="p-6 text-danger">Material não encontrado.</p>
+
+  return (
+    <main className="mx-auto flex max-w-md flex-col gap-4 px-4 pt-6 pb-8">
+      <Link to="/biblioteca" className="font-bold text-brand underline underline-offset-4">Voltar à biblioteca</Link>
+      <header className="flex flex-col gap-2">
+        <div className="flex flex-wrap gap-2">
+          <Badge tone={book.kind === 'livro' ? 'brand' : 'success'}>{book.kind === 'livro' ? 'Livro' : 'Curso'}</Badge>
+          <Badge tone="muted">{phaseLabel(book.phase)}</Badge>
+        </div>
+        <h1 className="font-display text-3xl leading-tight font-black">{book.title}</h1>
+        {book.author && <p className="text-muted">{book.author}</p>}
+      </header>
+
+      {book.kind === 'curso' && book.externalUrl && (
+        <a href={book.externalUrl} target="_blank" rel="noopener noreferrer" className="font-bold text-brand underline underline-offset-4">Abrir curso</a>
+      )}
+
+      {book.kind === 'livro' && (book.filePath
+        ? <Reader key={book.filePath} book={book} role={role} />
+        : (
+          <Card className="flex flex-col gap-2">
+            <p className="font-bold">PDF ainda não disponível</p>
+            {book.externalUrl && <a href={book.externalUrl} target="_blank" rel="noopener noreferrer" className="font-bold text-brand underline underline-offset-4">Abrir link (compra ou audiolivro)</a>}
+          </Card>
+        ))}
+
+      {role === 'mentor' && book.kind === 'livro' && <BookAdmin key={`${book.id}:${book.filePath}`} book={book} />}
+    </main>
+  )
+}
+```
+
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npx vitest run src/features/library 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS; `tsc` sem erros.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/features/library/BookAdmin.tsx src/features/library/LibraryScreen.tsx src/features/library/BookScreen.tsx src/features/library/LibraryScreen.test.tsx src/features/library/BookScreen.test.tsx
+git commit -m "feat(library): library list, book screen with reader and mentor admin"
+```
+
+---
+
+### Task 41: JournalScreen, JournalForm e MentorJournal — **[W4]**
+
+**Files:**
+
+- Create: `src/features/journal/JournalForm.tsx`
+- Create: `src/features/journal/MentorJournal.tsx`
+- Create: `src/features/journal/JournalScreen.tsx`
+- Test: `src/features/journal/JournalForm.test.tsx`, `src/features/journal/JournalScreen.test.tsx`
+
+**Interfaces:**
+- Consumes: `useJournalEntries`, `useSaveJournalEntry` (mockados a partir da Task 33); `useAutosave` (Task 35); `journalDayStatus`, `DAY_STATUS_LABEL`, `lastDays` (Task 33); `fieldOk`, `MIN_FIELD`, `writeWindow` (Parte 2); `formatWhen` de `@/features/simulations/format` (E5); `useAuth`; `Badge`, `Card`, `TextArea`.
+- Produces: `JournalScreen()` (`/caderno` e `/caderno/dia/:date`, sem props). Aluna: `JournalForm({ date, initial })` com os 3 campos e contador de 15 caracteres, salvamento automático com "Salvo", marca "Completo" / "Preenchido com atraso" vinda do banco, aviso do prazo até 12:00 e dia fechado somente leitura (Review Focus 1), mais a lista dos últimos 14 dias com a situação de cada um; data inválida ou futura volta para hoje. Mentor: `MentorJournal({ entries })` com 30 dias, texto dos campos, "Criado … · atualizado …" (horários do banco) e "Em falta". O mentor nunca vê formulário.
+
+
+- [ ] **Step 1: Testes**
+
+`src/features/journal/JournalForm.test.tsx`:
+```tsx
+import { act, fireEvent, render, screen } from '@testing-library/react'
+import { asyncMutationOf, entryOf } from '@/test/e6Mocks'
+
+vi.mock('@/lib/supabase', () => ({ supabase: {} }))
+vi.mock('./hooks')
+
+import { JournalForm } from './JournalForm'
+import * as api from './hooks'
+
+const saveAsync = vi.fn()
+
+function setup(date: string, initial = undefined as ReturnType<typeof entryOf> | undefined, saved?: ReturnType<typeof entryOf>) {
+  saveAsync.mockResolvedValue(saved ?? entryOf({ date }))
+  vi.mocked(api.useSaveJournalEntry).mockReturnValue({ ...(asyncMutationOf(saveAsync) as object), data: saved } as never)
+  return render(<JournalForm date={date} initial={initial} />)
+}
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date('2026-09-29T15:00:00Z')) // 12:00 em SP
+})
+afterEach(() => vi.useRealTimers())
+
+test('três campos com contador de 15 caracteres e o dia pendente (RF-50)', () => {
+  setup('2026-09-29')
+  expect(screen.getByLabelText('Uma coisa que aprendi')).toBeInTheDocument()
+  expect(screen.getByLabelText('Uma coisa que pratiquei')).toBeInTheDocument()
+  expect(screen.getByLabelText('Uma coisa para amanhã')).toBeInTheDocument()
+  expect(screen.getByText('Pendente')).toBeInTheDocument()
+  expect(screen.getByText(/3 campos de pelo menos 15 caracteres/)).toBeInTheDocument()
+})
+
+test('digitar salva sozinho depois de 1 s e mostra "Salvo" (RF-54)', async () => {
+  setup('2026-09-29')
+  fireEvent.change(screen.getByLabelText('Uma coisa que aprendi'), { target: { value: 'aprendi a ouvir o cliente' } })
+  expect(saveAsync).not.toHaveBeenCalled()
+  await act(async () => { await vi.advanceTimersByTimeAsync(1100) })
+  expect(saveAsync).toHaveBeenCalledWith({ date: '2026-09-29', learned: 'aprendi a ouvir o cliente', practiced: '', tomorrow: '' })
+  expect(screen.getByText('Salvo')).toBeInTheDocument()
+})
+
+test('a marca "Completo" vem do banco, não do navegador', () => {
+  setup('2026-09-29', entryOf({ date: '2026-09-29', complete: false }), entryOf({ date: '2026-09-29', complete: true }))
+  expect(screen.getByText('Completo')).toBeInTheDocument()
+})
+
+test('ontem antes do meio-dia ainda dá para preencher e vira "com atraso" (RF-50)', () => {
+  vi.setSystemTime(new Date('2026-09-30T14:59:00Z')) // 11:59 em SP
+  setup('2026-09-29')
+  expect(screen.getByText(/ainda pode preencher este dia até 12:00/)).toBeInTheDocument()
+  expect(screen.getByLabelText('Uma coisa que aprendi')).toBeEnabled()
+})
+
+test('a entrada preenchida com atraso mostra a marca depois de fechar', () => {
+  vi.setSystemTime(new Date('2026-10-02T15:00:00Z'))
+  setup('2026-09-29', entryOf({ date: '2026-09-29', complete: true, late: true }))
+  expect(screen.getByText('Preenchido com atraso')).toBeInTheDocument()
+})
+
+test('meio-dia em ponto: o dia fecha e nada é editável nem salvo (Review Focus 1)', async () => {
+  vi.setSystemTime(new Date('2026-09-30T15:00:00Z')) // 12:00 em SP
+  setup('2026-09-29')
+  expect(screen.getByText(/Este dia está fechado/)).toBeInTheDocument()
+  expect(screen.getByText('Em falta')).toBeInTheDocument()
+  expect(screen.getByLabelText('Uma coisa que aprendi')).toBeDisabled()
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+  expect(saveAsync).not.toHaveBeenCalled()
+})
+
+test('erro ao salvar aparece como alerta', async () => {
+  setup('2026-09-29')
+  saveAsync.mockRejectedValue(new Error('O prazo deste dia já passou'))
+  fireEvent.change(screen.getByLabelText('Uma coisa que aprendi'), { target: { value: 'aprendi algo novo hoje' } })
+  await act(async () => { await vi.advanceTimersByTimeAsync(1100) })
+  expect(screen.getByRole('alert')).toHaveTextContent('O prazo deste dia já passou')
+})
+```
+
+`src/features/journal/JournalScreen.test.tsx`:
+```tsx
+import { render, screen, within } from '@testing-library/react'
+import { MemoryRouter, Route, Routes } from 'react-router'
+import { asyncMutationOf, entryOf, queryOf } from '@/test/e6Mocks'
+
+vi.mock('@/lib/supabase', () => ({ supabase: {} }))
+vi.mock('@/features/auth/AuthProvider', () => ({ useAuth: vi.fn() }))
+vi.mock('./hooks')
+
+import { useAuth } from '@/features/auth/AuthProvider'
+import * as api from './hooks'
+import { JournalScreen } from './JournalScreen'
+
+function setup(role: 'aluna' | 'mentor', path = '/caderno', entries = [entryOf({ date: '2026-09-28' })]) {
+  vi.mocked(useAuth).mockReturnValue({ profile: { id: 'u', role, name: 'X' } } as never)
+  vi.mocked(api.useJournalEntries).mockReturnValue(queryOf(entries))
+  vi.mocked(api.useSaveJournalEntry).mockReturnValue(asyncMutationOf())
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <Routes>
+        <Route path="/caderno" element={<JournalScreen />} />
+        <Route path="/caderno/dia/:date" element={<JournalScreen />} />
+      </Routes>
+    </MemoryRouter>,
+  )
+}
+
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2026-09-29T15:00:00Z')) // terça, 12:00 em SP
+})
+afterEach(() => vi.useRealTimers())
+
+test('aluna abre o dia de hoje e vê os últimos 14 dias com a situação de cada um', () => {
+  setup('aluna')
+  expect(screen.getByRole('heading', { name: /terça-feira, 29 de setembro/i })).toBeInTheDocument()
+  const days = within(screen.getByRole('list')).getAllByRole('listitem')
+  expect(days).toHaveLength(14)
+  expect(days[0]).toHaveTextContent('29/09')
+  expect(days[0]).toHaveTextContent('Pendente')
+  expect(days[1]).toHaveTextContent('28/09')
+  expect(days[1]).toHaveTextContent('Completo')
+  expect(days[2]).toHaveTextContent('Em falta')
+})
+
+test('link de um dia anterior abre aquele dia', () => {
+  setup('aluna', '/caderno/dia/2026-09-28')
+  expect(screen.getByRole('heading', { name: /segunda-feira, 28 de setembro/i })).toBeInTheDocument()
+  expect(screen.getByDisplayValue('aprendi a ouvir o cliente')).toBeInTheDocument()
+})
+
+test('data inválida ou futura volta para hoje', () => {
+  setup('aluna', '/caderno/dia/2026-10-05')
+  expect(screen.getByRole('heading', { name: /29 de setembro/i })).toBeInTheDocument()
+})
+
+test('mentor vê o caderno da aluna, com os horários do banco e os dias em falta (RF-50/52)', () => {
+  setup('mentor')
+  expect(screen.queryByLabelText('Uma coisa que aprendi')).not.toBeInTheDocument()
+  const cards = screen.getAllByRole('listitem')
+  expect(cards).toHaveLength(30)
+  const day28 = cards[1]
+  expect(day28).toHaveTextContent('aprendi a ouvir o cliente')
+  expect(day28).toHaveTextContent('Criado 29/09, 19:10')
+  expect(day28).toHaveTextContent('atualizado 29/09, 20:02')
+  expect(cards[2]).toHaveTextContent('Em falta')
+})
+```
+
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/features/journal 2>&1 | tail -10`
+Expected: FAIL — `Failed to resolve import` do componente ainda inexistente.
+
+- [ ] **Step 3: Implementar**
+
+`src/features/journal/JournalForm.tsx`:
+```tsx
+import { useState } from 'react'
+import { Badge, Card, TextArea } from '@/design/ui'
+import { fieldOk, MIN_FIELD, writeWindow } from '@/domain/journal'
+import { DAY_STATUS_LABEL, journalDayStatus, type DayStatus } from '@/domain/journalDays'
+import { useAutosave } from '@/lib/useAutosave'
+import { useSaveJournalEntry } from './hooks'
+import type { JournalEntry } from './types'
+
+const TONE: Record<DayStatus, 'brand' | 'success' | 'streak' | 'muted'> = {
+  done: 'success', done_late: 'streak', open: 'brand', late_window: 'streak', missing: 'muted', future: 'muted',
+}
+const longDate = new Intl.DateTimeFormat('pt-BR', { timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long' })
+const SAVE_TEXT = { idle: '', saving: 'Salvando…', saved: 'Salvo', error: '' } as const
+
+/** Um dia do caderno (RF-50/54): 3 campos de pelo menos 15 caracteres, salvamento automático e marca de atraso. */
+export function JournalForm({ date, initial }: { date: string; initial: JournalEntry | undefined }) {
+  const [now] = useState(() => new Date())
+  const save = useSaveJournalEntry()
+  const [fields, setFields] = useState({ learned: initial?.learned ?? '', practiced: initial?.practiced ?? '', tomorrow: initial?.tomorrow ?? '' })
+  const closed = writeWindow(date, now) === 'closed'
+  const autosave = useAutosave({ value: fields, save: (v) => save.mutateAsync({ date, ...v }), enabled: !closed })
+
+  // O banco decide `complete` e `late`; enquanto nada foi salvo, vale o que já existia.
+  const server = save.data ?? initial
+  const status = journalDayStatus(date, now, server ? { complete: server.complete, late: server.late } : undefined)
+  const set = (k: keyof typeof fields) => (v: string) => setFields((f) => ({ ...f, [k]: v }))
+  const shortFields = Object.values(fields).some((v) => !fieldOk(v))
+
+  return (
+    <Card className="flex flex-col gap-4">
+      <header className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="font-display text-2xl leading-tight font-black first-letter:uppercase">{longDate.format(new Date(`${date}T12:00:00Z`))}</h2>
+        <Badge tone={TONE[status]}>{DAY_STATUS_LABEL[status]}</Badge>
+      </header>
+
+      {closed && <p role="status" className="font-bold text-muted">Este dia está fechado: o prazo era até 12:00 do dia seguinte (horário de São Paulo).</p>}
+      {status === 'late_window' && <p role="status" className="text-streak">Você ainda pode preencher este dia até 12:00. Ele vai constar como preenchido com atraso.</p>}
+
+      <TextArea label="Uma coisa que aprendi" value={fields.learned} onChange={set('learned')} minChars={MIN_FIELD} disabled={closed} />
+      <TextArea label="Uma coisa que pratiquei" value={fields.practiced} onChange={set('practiced')} minChars={MIN_FIELD} disabled={closed} />
+      <TextArea label="Uma coisa para amanhã" value={fields.tomorrow} onChange={set('tomorrow')} minChars={MIN_FIELD} disabled={closed} />
+
+      {!closed && shortFields && <p className="text-sm text-muted">O dia só conta como completo com os 3 campos de pelo menos {MIN_FIELD} caracteres.</p>}
+      <p aria-live="polite" className="text-sm text-success">{SAVE_TEXT[autosave.status]}</p>
+      {autosave.error && <p role="alert" className="text-danger">{autosave.error}</p>}
+    </Card>
+  )
+}
+```
+
+`src/features/journal/MentorJournal.tsx`:
+```tsx
+import { useState } from 'react'
+import { Badge, Card } from '@/design/ui'
+import { DAY_STATUS_LABEL, journalDayStatus, lastDays } from '@/domain/journalDays'
+import { formatWhen } from '@/features/simulations/format'
+import { spDate } from '@/lib/dates'
+import type { JournalEntry } from './types'
+
+/** Visão do mentor (RF-50/52): o caderno da aluna, sempre visível, com os horários gravados pelo banco e os dias em falta. */
+export function MentorJournal({ entries }: { entries: JournalEntry[] }) {
+  const [now] = useState(() => new Date())
+  const byDate = new Map(entries.map((e) => [e.date, e]))
+  return (
+    <ul className="flex flex-col gap-3">
+      {lastDays(spDate(now), 30).map((date) => {
+        const e = byDate.get(date)
+        const status = journalDayStatus(date, now, e ? { complete: e.complete, late: e.late } : undefined)
+        return (
+          <li key={date}>
+            <Card className="flex flex-col gap-2">
+              <header className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="font-bold tabular-nums">{date.split('-').reverse().join('/')}</h2>
+                <Badge tone={status === 'done' ? 'success' : status === 'missing' ? 'muted' : 'streak'}>{DAY_STATUS_LABEL[status]}</Badge>
+              </header>
+              {e ? (
+                <>
+                  <p><span className="font-bold text-muted">Aprendi:</span> {e.learned || '—'}</p>
+                  <p><span className="font-bold text-muted">Pratiquei:</span> {e.practiced || '—'}</p>
+                  <p><span className="font-bold text-muted">Amanhã:</span> {e.tomorrow || '—'}</p>
+                  <p className="text-sm text-muted">Criado {formatWhen(e.createdAt)} · atualizado {formatWhen(e.updatedAt)}</p>
+                </>
+              ) : (
+                status !== 'open' && <p className="text-sm text-muted">Sem entrada neste dia.</p>
+              )}
+            </Card>
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+```
+
+`src/features/journal/JournalScreen.tsx`:
+```tsx
+import { useState } from 'react'
+import { Link, Navigate, useParams } from 'react-router'
+import { Badge } from '@/design/ui'
+import { DAY_STATUS_LABEL, journalDayStatus, lastDays } from '@/domain/journalDays'
+import { useAuth } from '@/features/auth/AuthProvider'
+import { spDate } from '@/lib/dates'
+import { useJournalEntries } from './hooks'
+import { JournalForm } from './JournalForm'
+import { MentorJournal } from './MentorJournal'
+
+const ISO = /^\d{4}-\d{2}-\d{2}$/
+
+/** `/caderno` e `/caderno/dia/:date`: a aluna escreve o dia; o mentor lê o caderno dela. */
+export function JournalScreen() {
+  const { date: param } = useParams()
+  const { profile } = useAuth()
+  const entries = useJournalEntries()
+  const [now] = useState(() => new Date())
+  const today = spDate(now)
+
+  if (entries.isLoading) return <p role="status" className="p-2 text-muted">Carregando o caderno…</p>
+  if (!entries.data) return <p role="alert" className="p-2 text-danger">Não foi possível carregar o caderno.</p>
+
+  if (profile?.role === 'mentor') return <MentorJournal entries={entries.data} />
+
+  if (param !== undefined && (!ISO.test(param) || param > today)) return <Navigate to="/caderno" replace />
+  const date = param ?? today
+  const byDate = new Map(entries.data.map((e) => [e.date, e]))
+
+  return (
+    <div className="flex flex-col gap-6">
+      <JournalForm key={date} date={date} initial={byDate.get(date)} />
+      <section aria-labelledby="dias" className="flex flex-col gap-2">
+        <h2 id="dias" className="font-display text-2xl font-black">Últimos dias</h2>
+        <ul className="flex flex-col gap-1">
+          {lastDays(today, 14).map((d) => {
+            const e = byDate.get(d)
+            const status = journalDayStatus(d, now, e ? { complete: e.complete, late: e.late } : undefined)
+            return (
+              <li key={d}>
+                <Link to={d === today ? '/caderno' : `/caderno/dia/${d}`} aria-current={d === date ? 'date' : undefined}
+                  className="flex min-h-12 items-center justify-between gap-3 rounded-control border border-edge bg-surface px-3">
+                  <span className="tabular-nums">{d.split('-').reverse().join('/')}</span>
+                  <Badge tone={status === 'done' ? 'success' : status === 'open' ? 'brand' : status === 'missing' ? 'muted' : 'streak'}>{DAY_STATUS_LABEL[status]}</Badge>
+                </Link>
+              </li>
+            )
+          })}
+        </ul>
+      </section>
+    </div>
+  )
+}
+```
+
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npx vitest run src/features/journal 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS; `tsc` sem erros.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/features/journal/JournalForm.tsx src/features/journal/MentorJournal.tsx src/features/journal/JournalScreen.tsx src/features/journal/JournalForm.test.tsx src/features/journal/JournalScreen.test.tsx
+git commit -m "feat(journal): daily journal form with autosave, deadline states and mentor view"
+```
+
+---
+
+### Task 42: NotesScreen e NoteEditor — **[W4]**
+
+**Files:**
+
+- Create: `src/features/notes/NotesScreen.tsx`
+- Create: `src/features/notes/NoteEditor.tsx`
+- Test: `src/features/notes/NotesScreen.test.tsx`, `src/features/notes/NoteEditor.test.tsx`
+
+**Interfaces:**
+- Consumes: `useNotes`, `useNote`, `useSaveNote`, `useDeleteNote` (mockados a partir da Task 33); `useAutosave`, `useDebounced`, `Markdown` (Task 35); `noteLinkFromParams`, `noteLinkLabel`, `noteLinkPath`, `snippet` (Task 33); `formatWhen` de `@/features/simulations/format` (E5); `useAuth`; `Badge`, `Button`, `Card`, `Checkbox`, `TextArea`.
+- Produces: `NotesScreen()` (`/caderno/notas`, RF-51/53): lista com busca que só consulta 300 ms depois da última tecla, selo Privada/Compartilhada e vínculo; o mentor vê as compartilhadas como "Compartilhada pela aluna". `NoteEditor()` (`/caderno/notas/nova` e `/caderno/notas/:id`, RF-51/52/54): título, texto em Markdown simples com "Visualizar", "Compartilhar com o mentor" desligado por padrão (o mentor não tem essa opção: as notas dele são só dele), vínculo vindo da rota (`?semana=w05`), salvamento automático com o mesmo id da nota (sem duplicar), apagar com confirmação, nota alheia em somente leitura. A nota nova só é gravada depois da primeira alteração.
+
+
+- [ ] **Step 1: Testes**
+
+`src/features/notes/NotesScreen.test.tsx`:
+```tsx
+import { act, fireEvent, render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router'
+import { noteOf, queryOf } from '@/test/e6Mocks'
+
+vi.mock('@/lib/supabase', () => ({ supabase: {} }))
+vi.mock('./hooks')
+
+import * as api from './hooks'
+import { NotesScreen } from './NotesScreen'
+
+function setup(notes = [noteOf()]) {
+  vi.mocked(api.useNotes).mockReturnValue(queryOf(notes))
+  return render(<MemoryRouter><NotesScreen /></MemoryRouter>)
+}
+
+beforeEach(() => { vi.clearAllMocks(); vi.useFakeTimers({ shouldAdvanceTime: true }) })
+afterEach(() => vi.useRealTimers())
+
+test('lista notas com selo de privacidade, vínculo e resumo sem marcação', () => {
+  setup([noteOf({ link: { type: 'week', id: 'w05' } }), noteOf({ id: 'n2', title: '', body: '', private: false })])
+  expect(screen.getByText('Privada')).toBeInTheDocument()
+  expect(screen.getByText('Compartilhada')).toBeInTheDocument()
+  expect(screen.getByText('Semana 5')).toBeInTheDocument()
+  expect(screen.getByText('Começar pelo porquê.')).toBeInTheDocument()
+  expect(screen.getByText('Sem título')).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: /Ideias de abertura/ })).toHaveAttribute('href', '/caderno/notas/n1')
+})
+
+test('nota da aluna vista pelo mentor vem marcada como compartilhada por ela (RF-52)', () => {
+  setup([noteOf({ mine: false, private: false })])
+  expect(screen.getByText('Compartilhada pela aluna')).toBeInTheDocument()
+})
+
+test('a busca só consulta depois de 300 ms parada (RF-53)', async () => {
+  setup()
+  expect(api.useNotes).toHaveBeenLastCalledWith('')
+  fireEvent.change(screen.getByLabelText('Buscar nas notas'), { target: { value: 'vendas' } })
+  expect(api.useNotes).toHaveBeenLastCalledWith('')
+  await act(async () => { await vi.advanceTimersByTimeAsync(350) })
+  expect(api.useNotes).toHaveBeenLastCalledWith('vendas')
+})
+
+test('mensagens de lista vazia e de busca sem resultado; atalho para nova nota', async () => {
+  setup([])
+  expect(screen.getByText('Nenhuma nota ainda.')).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Nova nota' })).toHaveAttribute('href', '/caderno/notas/nova')
+  fireEvent.change(screen.getByLabelText('Buscar nas notas'), { target: { value: 'xyz' } })
+  await act(async () => { await vi.advanceTimersByTimeAsync(350) })
+  expect(screen.getByText('Nenhuma nota encontrada.')).toBeInTheDocument()
+})
+```
+
+`src/features/notes/NoteEditor.test.tsx`:
+```tsx
+import { act, fireEvent, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { MemoryRouter, Route, Routes } from 'react-router'
+import { asyncMutationOf, noteOf, queryOf } from '@/test/e6Mocks'
+
+vi.mock('@/lib/supabase', () => ({ supabase: {} }))
+vi.mock('@/features/auth/AuthProvider', () => ({ useAuth: vi.fn() }))
+vi.mock('./hooks')
+
+import { useAuth } from '@/features/auth/AuthProvider'
+import * as api from './hooks'
+import { NoteEditor } from './NoteEditor'
+import type { Note } from './types'
+
+const saveAsync = vi.fn()
+const remove = vi.fn()
+
+function setup(path: string, opts: { role?: 'aluna' | 'mentor'; note?: Note | null } = {}) {
+  vi.mocked(useAuth).mockReturnValue({ profile: { id: 'u', role: opts.role ?? 'aluna', name: 'X' } } as never)
+  vi.mocked(api.useNote).mockReturnValue(queryOf(opts.note === undefined ? noteOf() : opts.note))
+  vi.mocked(api.useSaveNote).mockReturnValue(asyncMutationOf(saveAsync))
+  vi.mocked(api.useDeleteNote).mockReturnValue({ ...(asyncMutationOf() as object), mutate: remove } as never)
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <Routes>
+        <Route path="/caderno/notas/nova" element={<NoteEditor />} />
+        <Route path="/caderno/notas/:id" element={<NoteEditor />} />
+        <Route path="/caderno/notas" element={<p>lista de notas</p>} />
+      </Routes>
+    </MemoryRouter>,
+  )
+}
+
+beforeEach(() => { vi.clearAllMocks(); saveAsync.mockResolvedValue(undefined); vi.useFakeTimers({ shouldAdvanceTime: true }) })
+afterEach(() => vi.useRealTimers())
+
+test('nota nova nasce privada e só salva depois que a aluna escreve (RF-52/54)', async () => {
+  setup('/caderno/notas/nova')
+  expect(screen.getByRole('checkbox', { name: 'Compartilhar com o mentor' })).not.toBeChecked()
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+  expect(saveAsync).not.toHaveBeenCalled()
+  fireEvent.change(screen.getByLabelText('Título'), { target: { value: 'Ideias' } })
+  await act(async () => { await vi.advanceTimersByTimeAsync(1100) })
+  expect(saveAsync).toHaveBeenCalledTimes(1)
+  expect(saveAsync.mock.calls[0][0]).toMatchObject({ title: 'Ideias', body: '', private: true, link: null })
+  expect(saveAsync.mock.calls[0][0].id).toEqual(expect.any(String))
+  expect(screen.getByText('Salvo')).toBeInTheDocument()
+})
+
+test('as próximas gravações da mesma nota usam o mesmo id (sem duplicar)', async () => {
+  setup('/caderno/notas/nova')
+  fireEvent.change(screen.getByLabelText('Título'), { target: { value: 'A' } })
+  await act(async () => { await vi.advanceTimersByTimeAsync(1100) })
+  fireEvent.change(screen.getByLabelText('Título'), { target: { value: 'AB' } })
+  await act(async () => { await vi.advanceTimersByTimeAsync(1100) })
+  expect(saveAsync).toHaveBeenCalledTimes(2)
+  expect(saveAsync.mock.calls[0][0].id).toBe(saveAsync.mock.calls[1][0].id)
+})
+
+test('vínculo vem da rota (semana) e é gravado com a nota', async () => {
+  setup('/caderno/notas/nova?semana=w05')
+  expect(screen.getByRole('link', { name: 'Semana 5' })).toHaveAttribute('href', '/trilha/w05')
+  fireEvent.change(screen.getByLabelText('Título'), { target: { value: 'Sobre a semana' } })
+  await act(async () => { await vi.advanceTimersByTimeAsync(1100) })
+  expect(saveAsync.mock.calls[0][0].link).toEqual({ type: 'week', id: 'w05' })
+})
+
+test('compartilhar com o mentor troca private para false', async () => {
+  setup('/caderno/notas/nova')
+  await userEvent.setup({ advanceTimers: vi.advanceTimersByTime }).click(screen.getByRole('checkbox', { name: 'Compartilhar com o mentor' }))
+  await act(async () => { await vi.advanceTimersByTimeAsync(1100) })
+  expect(saveAsync.mock.calls[0][0].private).toBe(false)
+})
+
+test('abre uma nota existente e a visualização renderiza o Markdown', async () => {
+  setup('/caderno/notas/n1')
+  expect(screen.getByLabelText('Título')).toHaveValue('Ideias de abertura')
+  await userEvent.setup({ advanceTimers: vi.advanceTimersByTime }).click(screen.getByRole('button', { name: 'Visualizar' }))
+  expect(screen.getByText('porquê').tagName).toBe('STRONG')
+})
+
+test('nota do outro (mentor lendo nota compartilhada) é só leitura', () => {
+  setup('/caderno/notas/n1', { role: 'mentor', note: noteOf({ mine: false, private: false, title: 'Da aluna' }) })
+  expect(screen.getByRole('heading', { name: 'Da aluna' })).toBeInTheDocument()
+  expect(screen.queryByLabelText('Título')).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Apagar nota' })).not.toBeInTheDocument()
+})
+
+test('o mentor não tem a opção de compartilhar: as notas dele são só dele', () => {
+  setup('/caderno/notas/nova', { role: 'mentor' })
+  expect(screen.queryByRole('checkbox', { name: 'Compartilhar com o mentor' })).not.toBeInTheDocument()
+  expect(screen.getByText('Só você vê esta nota.')).toBeInTheDocument()
+})
+
+test('apagar pede confirmação e volta para a lista', async () => {
+  remove.mockImplementation((_id: string, o: { onSuccess: () => void }) => o.onSuccess())
+  setup('/caderno/notas/n1')
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+  await user.click(screen.getByRole('button', { name: 'Apagar nota' }))
+  expect(remove).not.toHaveBeenCalled()
+  await user.click(screen.getByRole('button', { name: 'Confirmar exclusão' }))
+  expect(remove).toHaveBeenCalledWith('n1', expect.anything())
+  expect(await screen.findByText('lista de notas')).toBeInTheDocument()
+})
+
+test('nota inexistente', () => {
+  setup('/caderno/notas/sumiu', { note: null })
+  expect(screen.getByRole('alert')).toHaveTextContent('Nota não encontrada')
+})
+```
+
+
+- [ ] **Step 2: Rodar e ver falhar**
+
+Run: `npx vitest run src/features/notes/NotesScreen.test.tsx src/features/notes/NoteEditor.test.tsx 2>&1 | tail -10`
+Expected: FAIL — `Failed to resolve import` do componente ainda inexistente.
+
+- [ ] **Step 3: Implementar**
+
+`src/features/notes/NotesScreen.tsx`:
+```tsx
+import { useState } from 'react'
+import { Link } from 'react-router'
+import { Badge, Card } from '@/design/ui'
+import { noteLinkLabel, snippet } from '@/domain/notes'
+import { formatWhen } from '@/features/simulations/format'
+import { useDebounced } from '@/lib/useDebounced'
+import { useNotes } from './hooks'
+
+/** `/caderno/notas` (RF-51/53): notas com busca. O mentor só vê as que a aluna compartilhou. */
+export function NotesScreen() {
+  const [search, setSearch] = useState('')
+  const term = useDebounced(search, 300)
+  const notes = useNotes(term)
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="flex min-w-0 flex-1 flex-col gap-1 font-bold">Buscar nas notas
+          <input type="search" value={search} onChange={(e) => setSearch(e.target.value)}
+            className="h-12 rounded-control border-2 border-line bg-surface px-3 font-normal focus:border-brand focus:outline-none" />
+        </label>
+        <Link to="/caderno/notas/nova" className="inline-flex h-12 items-center rounded-control bg-brand px-5 font-bold text-on-brand">Nova nota</Link>
+      </div>
+
+      {notes.isLoading && <p role="status" className="text-muted">Carregando as notas…</p>}
+      {notes.error && <p role="alert" className="text-danger">Não foi possível carregar as notas.</p>}
+      {notes.data?.length === 0 && <p className="text-muted">{term ? 'Nenhuma nota encontrada.' : 'Nenhuma nota ainda.'}</p>}
+
+      <ul className="flex flex-col gap-3">
+        {notes.data?.map((n) => (
+          <li key={n.id}>
+            <Link to={`/caderno/notas/${n.id}`} className="block">
+              <Card className="flex flex-col gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="font-bold">{n.title || 'Sem título'}</h2>
+                  {n.mine
+                    ? <Badge tone={n.private ? 'muted' : 'success'}>{n.private ? 'Privada' : 'Compartilhada'}</Badge>
+                    : <Badge tone="brand">Compartilhada pela aluna</Badge>}
+                  {n.link && <Badge tone="streak">{noteLinkLabel(n.link)}</Badge>}
+                </div>
+                {n.body && <p className="text-sm text-muted">{snippet(n.body)}</p>}
+                <p className="text-xs text-muted">Atualizada {formatWhen(n.updatedAt)}</p>
+              </Card>
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+```
+
+`src/features/notes/NoteEditor.tsx`:
+```tsx
+import { useState } from 'react'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
+import { Badge, Button, Card, Checkbox, TextArea } from '@/design/ui'
+import { noteLinkFromParams, noteLinkLabel, noteLinkPath, type NoteLink } from '@/domain/notes'
+import { useAuth } from '@/features/auth/AuthProvider'
+import { useAutosave } from '@/lib/useAutosave'
+import { useDeleteNote, useNote, useSaveNote } from './hooks'
+import { Markdown } from './Markdown'
+import type { Note } from './types'
+
+const SAVE_TEXT = { idle: '', saving: 'Salvando…', saved: 'Salvo', error: '' } as const
+
+function NoteForm({ id, initial, link }: { id: string; initial: Note | null; link: NoteLink | null }) {
+  const { profile } = useAuth()
+  const navigate = useNavigate()
+  const save = useSaveNote()
+  const remove = useDeleteNote()
+  const editable = initial === null || initial.mine
+  const [draft, setDraft] = useState({ title: initial?.title ?? '', body: initial?.body ?? '', private: initial?.private ?? true, link: initial?.link ?? link })
+  const [preview, setPreview] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const autosave = useAutosave({ value: draft, save: (v) => save.mutateAsync({ id, ...v }), enabled: editable })
+  const isMentor = profile?.role === 'mentor'
+
+  return (
+    <Card className="flex flex-col gap-4">
+      <Link to="/caderno/notas" className="font-bold text-brand underline underline-offset-4">Voltar às notas</Link>
+      {!editable && <Badge tone="brand">Compartilhada pela aluna</Badge>}
+      {draft.link && (
+        <Link to={noteLinkPath(draft.link)} className="w-fit"><Badge tone="streak">{noteLinkLabel(draft.link)}</Badge></Link>
+      )}
+
+      {editable ? (
+        <>
+          <label className="flex flex-col gap-1 font-bold">Título
+            <input value={draft.title} onChange={(e) => setDraft((d) => ({ ...d, title: e.target.value }))} maxLength={200}
+              className="h-12 rounded-control border-2 border-line bg-surface px-3 font-normal focus:border-brand focus:outline-none" />
+          </label>
+          {preview
+            ? <section aria-label="Pré-visualização"><Markdown source={draft.body} /></section>
+            : <TextArea label="Texto (Markdown simples)" value={draft.body} onChange={(body) => setDraft((d) => ({ ...d, body }))} />}
+          <div className="flex flex-wrap items-center gap-3">
+            <Button size="sm" variant="secondary" onClick={() => setPreview((p) => !p)}>{preview ? 'Editar' : 'Visualizar'}</Button>
+            {isMentor
+              ? <p className="text-sm text-muted">Só você vê esta nota.</p>
+              : <Checkbox checked={!draft.private} label="Compartilhar com o mentor" onChange={(shared) => setDraft((d) => ({ ...d, private: !shared }))} />}
+          </div>
+          <p aria-live="polite" className="text-sm text-success">{SAVE_TEXT[autosave.status]}</p>
+          {autosave.error && <p role="alert" className="text-danger">{autosave.error}</p>}
+          {initial && (
+            <div className="flex gap-2">
+              {confirming
+                ? <Button size="sm" variant="danger" loading={remove.isPending} onClick={() => remove.mutate(id, { onSuccess: () => navigate('/caderno/notas') })}>Confirmar exclusão</Button>
+                : <Button size="sm" variant="ghost" onClick={() => setConfirming(true)}>Apagar nota</Button>}
+            </div>
+          )}
+          {remove.error && <p role="alert" className="text-danger">{remove.error.message}</p>}
+        </>
+      ) : (
+        <>
+          <h1 className="font-display text-3xl font-black">{initial?.title || 'Sem título'}</h1>
+          <Markdown source={initial?.body ?? ''} />
+        </>
+      )}
+    </Card>
+  )
+}
+
+/** `/caderno/notas/nova` e `/caderno/notas/:id` (RF-51/52/54): título, Markdown simples, privada por padrão e salvamento automático. */
+export function NoteEditor() {
+  const { id: param } = useParams()
+  const [search] = useSearchParams()
+  const [newId] = useState(() => crypto.randomUUID())
+  const note = useNote(param)
+
+  if (param !== undefined) {
+    if (note.isLoading) return <p role="status" className="text-muted">Carregando a nota…</p>
+    if (!note.data) return <p role="alert" className="text-danger">Nota não encontrada.</p>
+    return <NoteForm key={param} id={param} initial={note.data} link={null} />
+  }
+  return <NoteForm id={newId} initial={null} link={noteLinkFromParams(search)} />
+}
+```
+
+
+- [ ] **Step 4: Rodar e ver passar**
+
+Run: `npx vitest run src/features/notes/NotesScreen.test.tsx src/features/notes/NoteEditor.test.tsx 2>&1 | tail -8 && npx tsc -b 2>&1 | tail -5`
+Expected: PASS; `tsc` sem erros.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/features/notes/NotesScreen.tsx src/features/notes/NoteEditor.tsx src/features/notes/NotesScreen.test.tsx src/features/notes/NoteEditor.test.tsx
+git commit -m "feat(notes): notes list with search and editor with autosave and privacy toggle"
+```
+
+---
+
+### Task 43: Rotas, aba "Caderno", aviso da tela Hoje e E2E — **[W4]**
+
+**Files:**
+- Create: `src/features/journal/CadernoLayout.tsx`, `e2e/journal.spec.ts`
+- Modify: `src/features/shell/AppShell.tsx`, `src/features/shell/AppShell.test.tsx`, `src/App.tsx`, `src/App.test.tsx`, `src/features/today/TodayScreen.tsx`, `src/features/today/TodayScreen.test.tsx`, `e2e/support.ts`
+- Test: `src/features/journal/CadernoLayout.test.tsx`
+
+**Interfaces:**
+- Consumes: todas as telas das Tasks 38–42; `yesterdayNotice` (Task 33); migration (Task 34) e hooks (Tasks 36 e 37) já aplicados; helpers do E2E da Parte 3 (`signIn`, `studentEmail`, `mentorEmail`).
+- Produces: `CadernoLayout` (moldura com as abas Dia, Notas, Listas e o atalho Biblioteca); rotas `/caderno`, `/caderno/dia/:date`, `/caderno/notas`, `/caderno/notas/nova`, `/caderno/notas/:id`, `/caderno/checklists`, `/biblioteca`, `/biblioteca/:bookId` (esta com `lazy`); aba "Caderno" na `BottomNav`; aviso na tela Hoje quando o caderno de ontem está em falta (RF-50); `resetJournal()` em `e2e/support.ts`.
+
+- [ ] **Step 1: Testes unitários da moldura, das rotas, da aba e do aviso**
+
+
+`src/features/journal/CadernoLayout.test.tsx`:
+```tsx
+import { render, screen } from '@testing-library/react'
+import { MemoryRouter, Route, Routes } from 'react-router'
+import { CadernoLayout } from './CadernoLayout'
+
+function renderAt(path: string) {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <Routes>
+        <Route path="/caderno" element={<CadernoLayout />}>
+          <Route index element={<p>tela do dia</p>} />
+          <Route path="dia/:date" element={<p>tela de outro dia</p>} />
+          <Route path="notas" element={<p>tela de notas</p>} />
+          <Route path="notas/:id" element={<p>tela de uma nota</p>} />
+        </Route>
+      </Routes>
+    </MemoryRouter>,
+  )
+}
+
+test('abas com a atual destacada', () => {
+  renderAt('/caderno')
+  expect(screen.getByRole('heading', { level: 1, name: 'Caderno' })).toBeInTheDocument()
+  expect(screen.getByText('tela do dia')).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Dia' })).toHaveAttribute('aria-current', 'page')
+  expect(screen.getByRole('link', { name: 'Notas' })).not.toHaveAttribute('aria-current')
+  expect(screen.getByRole('link', { name: 'Biblioteca' })).toHaveAttribute('href', '/biblioteca')
+})
+
+test('a aba Notas continua ativa dentro de uma nota; Dia não', () => {
+  renderAt('/caderno/notas/n1')
+  expect(screen.getByText('tela de uma nota')).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Notas' })).toHaveAttribute('aria-current', 'page')
+  expect(screen.getByRole('link', { name: 'Dia' })).not.toHaveAttribute('aria-current')
+})
+
+test('um dia de outra data continua na aba Dia', () => {
+  renderAt('/caderno/dia/2026-09-28')
+  expect(screen.getByText('tela de outro dia')).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Dia' })).toHaveAttribute('aria-current', 'page')
+  expect(screen.getByRole('link', { name: 'Notas' })).not.toHaveAttribute('aria-current')
+})
+```
+
+
+Em `src/features/shell/AppShell.test.tsx`, acrescentar a rota `<Route path="caderno/notas" element={<h1>Tela notas</h1>} />` ao lado das outras dentro de `renderAt` e o caso:
+```tsx
+test('aba Caderno continua ativa dentro das notas', () => {
+  renderAt('/caderno/notas')
+  expect(screen.getByRole('link', { name: 'Caderno' })).toHaveAttribute('aria-current', 'page')
+  expect(screen.getByRole('link', { name: 'Simulados' })).not.toHaveAttribute('aria-current')
+})
+```
+
+Em `src/App.test.tsx`, acrescentar no fim (o mock de `@/lib/supabase` do arquivo já devolve sessão vazia):
+```tsx
+test('rotas do caderno e da biblioteca exigem login', async () => {
+  for (const path of ['/caderno', '/caderno/notas/nova', '/caderno/checklists', '/biblioteca', '/biblioteca/carnegie']) {
+    const { unmount } = render(<MemoryRouter initialEntries={[path]}><AuthProvider><AppRoutes /></AuthProvider></MemoryRouter>)
+    expect(await screen.findByRole('heading', { name: 'Entrar' })).toBeInTheDocument()
+    unmount()
+  }
+})
+```
+
+Em `src/features/today/TodayScreen.test.tsx` (o relógio do arquivo é terça, 12:00 em SP), acrescentar no fim:
+```tsx
+test('caderno de ontem em falta gera aviso com link para o dia (RF-50)', () => {
+  setup({ journal: ['2026-09-27'] })
+  expect(screen.getByRole('status')).toHaveTextContent('O caderno de ontem ficou em falta.')
+  expect(screen.getByRole('link', { name: 'Ver o dia' })).toHaveAttribute('href', '/caderno/dia/2026-09-28')
+})
+
+test('antes do meio-dia o aviso convida a preencher ontem', () => {
+  vi.setSystemTime(new Date('2026-09-29T14:59:00Z')) // 11:59 em SP
+  setup({ journal: ['2026-09-27'] })
+  expect(screen.getByRole('status')).toHaveTextContent('ainda pode ser preenchido até 12:00')
+  expect(screen.getByRole('link', { name: 'Preencher agora' })).toBeInTheDocument()
+})
+
+test('caderno de ontem completo: sem aviso', () => {
+  setup({ journal: ['2026-09-28'] })
+  expect(screen.queryByRole('status')).not.toBeInTheDocument()
+})
+```
+
+- [ ] **Step 2: E2E — apoio e teste**
+
+Em `e2e/support.ts`, acrescentar antes de `signIn`:
+```ts
+/** Apaga todas as entradas do caderno do banco local. */
+export async function resetJournal(): Promise<void> {
+  const r = await admin.from('journal_entries').delete().not('id', 'is', null)
+  if (r.error) throw r.error
+}
+```
+
+> **Atenção:** `resetJournal` apaga todo o caderno do banco **local**; `e2e/support.ts` continua se recusando a rodar contra qualquer URL que não seja `localhost`/`127.0.0.1`.
+
+
+`e2e/journal.spec.ts`:
+```ts
+import { devices, expect, test, type Browser, type Page } from '@playwright/test'
+import { mentorEmail, resetJournal, signIn, studentEmail } from './support'
+
+/** Cada pessoa em um contexto próprio (sessões separadas), no mesmo formato de celular do projeto. */
+async function pageFor(browser: Browser, email: string): Promise<Page> {
+  const context = await browser.newContext({ ...devices['Pixel 7'], baseURL: 'http://localhost:5173' })
+  const page = await context.newPage()
+  await signIn(page, email)
+  return page
+}
+
+test.beforeEach(async () => { await resetJournal() })
+
+test('caderno do dia enviado pela aluna aparece para o mentor, com os horários', async ({ browser }) => {
+  const student = await pageFor(browser, await studentEmail())
+  await student.getByRole('link', { name: 'Caderno', exact: true }).click()
+  await expect(student.getByText('Pendente').first()).toBeVisible() // selo do dia e linha de hoje na lista
+
+  await student.getByLabel('Uma coisa que aprendi').fill('Aprendi a ouvir mais do que falar')
+  await student.getByLabel('Uma coisa que pratiquei').fill('Pratiquei o pitch de 30 segundos')
+  await student.getByLabel('Uma coisa para amanhã').fill('Ligar para três empresas amanhã')
+  await expect(student.getByText('Salvo')).toBeVisible()
+  await expect(student.getByText('Completo').first()).toBeVisible() // a marca vem do banco
+
+  await student.reload()
+  await expect(student.getByLabel('Uma coisa que aprendi')).toHaveValue('Aprendi a ouvir mais do que falar')
+
+  const mentor = await pageFor(browser, await mentorEmail())
+  await mentor.getByRole('link', { name: 'Caderno', exact: true }).click()
+  await expect(mentor.getByText('Aprendi a ouvir mais do que falar')).toBeVisible()
+  await expect(mentor.getByText(/Criado .* atualizado /).first()).toBeVisible()
+  await expect(mentor.getByLabel('Uma coisa que aprendi')).toHaveCount(0) // o mentor lê, não escreve
+})
+```
+
+
+- [ ] **Step 3: Rodar e ver falhar**
+
+Run: `npm test 2>&1 | tail -8 && set -a; eval "$(npx supabase status -o env)"; set +a; npx playwright test e2e/journal.spec.ts 2>&1 | tail -12`
+Expected: os testes novos do Vitest FAIL (aba, rotas e aviso inexistentes); o E2E FAIL em `getByRole('link', { name: 'Caderno', exact: true })` (a aba ainda não existe).
+
+- [ ] **Step 4: Implementar a moldura, a aba, as rotas e o aviso**
+
+
+`src/features/journal/CadernoLayout.tsx`:
+```tsx
+import { Link, Outlet, useLocation } from 'react-router'
+
+const TABS = [
+  { to: '/caderno', label: 'Dia', active: (p: string) => p === '/caderno' || p.startsWith('/caderno/dia/') },
+  { to: '/caderno/notas', label: 'Notas', active: (p: string) => p.startsWith('/caderno/notas') },
+  { to: '/caderno/checklists', label: 'Listas', active: (p: string) => p.startsWith('/caderno/checklists') },
+  { to: '/biblioteca', label: 'Biblioteca', active: () => false },
+]
+
+/** Moldura das telas do Caderno: título, abas (Dia, Notas, Listas e o atalho para a Biblioteca) e a tela da aba. */
+export function CadernoLayout() {
+  const { pathname } = useLocation()
+  return (
+    <main className="mx-auto flex max-w-md flex-col gap-5 px-4 pt-6 pb-8">
+      <h1 className="font-display text-6xl leading-none font-black text-brand text-glow">Caderno</h1>
+      <nav aria-label="Caderno" className="flex flex-wrap gap-2">
+        {TABS.map((t) => {
+          const on = t.active(pathname)
+          return (
+            <Link key={t.to} to={t.to} aria-current={on ? 'page' : undefined}
+              className={`inline-flex h-10 items-center rounded-control border-2 px-3 text-sm font-bold ${on ? 'border-brand bg-brand text-on-brand' : 'border-line bg-surface text-ink'}`}>
+              {t.label}
+            </Link>
+          )
+        })}
+      </nav>
+      <Outlet />
+    </main>
+  )
+}
+```
+
+
+Em `src/features/shell/AppShell.tsx`: acrescentar em `NAV`, depois de Simulados, `{ to: '/caderno', label: 'Caderno', icon: <PixelIcon name="notes" /> }` e remover o comentário `// E6 acrescenta "Caderno".`
+
+Em `src/App.tsx`: acrescentar os imports
+```tsx
+import { ChecklistsScreen } from './features/checklists/ChecklistsScreen'
+import { CadernoLayout } from './features/journal/CadernoLayout'
+import { JournalScreen } from './features/journal/JournalScreen'
+import { LibraryScreen } from './features/library/LibraryScreen'
+import { NoteEditor } from './features/notes/NoteEditor'
+import { NotesScreen } from './features/notes/NotesScreen'
+```
+o carregamento sob demanda do leitor (junto de `UiPreview`; o PDF.js pesa mais de 600 kB):
+```tsx
+// O leitor de PDF (PDF.js) é pesado: só carrega quando alguém abre um livro.
+const BookScreen = lazy(() => import('./features/library/BookScreen').then((m) => ({ default: m.BookScreen })))
+```
+e, dentro do `<Route element={<RequireAuth><AppShell /></RequireAuth>}>`, antes de `cenarios`:
+```tsx
+<Route path="caderno" element={<CadernoLayout />}>
+  <Route index element={<JournalScreen />} />
+  <Route path="dia/:date" element={<JournalScreen />} />
+  <Route path="notas" element={<NotesScreen />} />
+  <Route path="notas/nova" element={<NoteEditor />} />
+  <Route path="notas/:id" element={<NoteEditor />} />
+  <Route path="checklists" element={<ChecklistsScreen />} />
+</Route>
+<Route path="biblioteca" element={<LibraryScreen />} />
+<Route path="biblioteca/:bookId" element={<Suspense fallback={<p role="status" className="p-6 text-muted">Carregando…</p>}><BookScreen /></Suspense>} />
+```
+
+Em `src/features/today/TodayScreen.tsx`: acrescentar o import `import { yesterdayNotice } from '@/domain/journalDays'`, calcular depois de `const streak = currentStreak(journalDays, today)`:
+```tsx
+const notice = yesterdayNotice(journalDays, now)
+```
+e renderizar logo depois de `</header>`:
+```tsx
+{notice && (
+  <p role="status" className="rounded-card border-2 border-streak p-3 font-bold text-streak">
+    {notice.kind === 'missing' ? 'O caderno de ontem ficou em falta.' : 'O caderno de ontem ainda pode ser preenchido até 12:00.'}{' '}
+    <Link to={`/caderno/dia/${notice.date}`} className="underline underline-offset-4">{notice.kind === 'missing' ? 'Ver o dia' : 'Preencher agora'}</Link>
+  </p>
+)}
+```
+
+- [ ] **Step 5: Rodar e ver passar**
+
+Run: `npm test 2>&1 | tail -8 && set -a; eval "$(npx supabase status -o env)"; set +a; npx playwright test 2>&1 | tail -8`
+Expected: Vitest verde; Playwright verde (`journal.spec.ts` mais os E2E da trilha e dos simulados). O E2E do caderno leva ~5 s por causa do salvamento automático.
+
+- [ ] **Step 6: Conferência manual do leitor de PDF (o único trecho que os testes simulam)**
+
+Run: `npm run dev` e, no navegador, com o Supabase local no ar: entre como mentor, abra `/biblioteca/carnegie`, envie um PDF pequeno de 2 páginas ou mais (campo "Enviar o PDF") e confirme que o leitor abre; entre como aluna (outra janela anônima), abra o livro, vá para a página 2 e espere 2 s; recarregue a página.
+Expected: a aluna reabre na página 2 ("de N" correto); o mentor vê o mesmo PDF e a página que ele vira não é gravada; trocar o PDF pelo mentor faz a aluna reabrir na página salva (ajustada se o novo for menor). Anote qualquer diferença no PR.
+
+- [ ] **Step 7: Verificação final da etapa**
+
+Run: `npm test 2>&1 | tail -6 && npx supabase test db 2>&1 | tail -5 && npm run build 2>&1 | tail -6 && npm run lint 2>&1 | tail -4`
+Expected: tudo verde; o `build` gera um arquivo `pdf.worker.min-*.mjs` e o bundle principal fica abaixo de ~700 kB (o leitor vai num chunk à parte). Avisos antigos do `oxlint` em `AuthProvider` e `TodayScreen` não são desta etapa.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/features/journal/CadernoLayout.tsx src/features/journal/CadernoLayout.test.tsx src/features/shell/AppShell.tsx src/features/shell/AppShell.test.tsx src/App.tsx src/App.test.tsx src/features/today/TodayScreen.tsx src/features/today/TodayScreen.test.tsx e2e/journal.spec.ts e2e/support.ts
+git commit -m "feat(e6): caderno routes, nav tab, yesterday notice and journal e2e"
+```
+
+---
+
+## Cobertura dos RFs da E6
+
+| RF | Onde |
+|---|---|
+| RF-42 (checklists manuais: título, itens, semana e data opcionais) | Tasks 33 (`validateChecklistDraft`), 36 (hooks), 38 (telas); RLS da Task 5 provada na Task 34 |
+| RF-50 (caderno: 3 campos, ≥ 15 caracteres, prazo 12:00, atraso, horários do banco, aviso de ontem) | Task 5 (banco), Tasks 33 (`journalDayStatus`, `yesterdayNotice`), 36, 41 e 43; E2E na Task 43 |
+| RF-51 (notas em Markdown simples com vínculo) | Tasks 33 (`markdown`, `noteLinkFromParams`), 35 (`Markdown`), 42 |
+| RF-52 (caderno sempre visível ao mentor; notas privadas por padrão, no banco) | Task 5 (RLS) + Task 34 (prova) + Tasks 41 e 42 |
+| RF-53 (busca nas notas) | Task 5 (`tsvector`) + Tasks 34 (prova), 36 (`textSearch` em português) e 42 |
+| RF-54 (salvamento automático ~1 s com "salvo") | Task 35 + Tasks 41 e 42 |
+| RF-60 (12 materiais na ordem, tipo e fase) | Task 4 (seed) + Tasks 37 e 40 |
+| RF-61 (só o mentor sobe e remove; até 50 MB) | Task 5 + Task 34 (pasta e tipo) + Tasks 33, 37 e 40 |
+| RF-62 (livro sem PDF: aviso e link externo) | Tasks 33 (`normalizeExternalUrl`), 34, 37 e 40 |
+| RF-63 (leitor que abre na última página e salva a atual) | Tasks 37 (`useSaveBookProgress`), 39 e 40; conferência manual na Task 43 |
+| RF-64 (cursos por link externo) | Task 40 |
+| RF-65 (bucket privado, URL assinada de 1 h) | Task 5 (bucket) + Task 37 (`useBookUrl`) |
+
+## Após a Parte 5
+
+Com as Tasks 33–43 verdes, a E6 está concluída. Ficam fora e registrados: E2E do upload e da retomada do PDF (hoje só a conferência manual da Task 43 e os testes com o `react-pdf` simulado); busca por prefixo (a busca `websearch` em português casa palavras inteiras, com radical); revisão das notas por data. Próximo passo: detalhar **E7 — Painéis** (nova "Parte 6"), reaproveitando `journalCompliance` e `currentStreak` (`src/domain/streak.ts`), `officialScore` e o padrão de hooks isolados.
