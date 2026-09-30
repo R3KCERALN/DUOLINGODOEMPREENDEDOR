@@ -50,7 +50,14 @@
 }
 
 @layer base {
+  /* Sem "elástico" além do conteúdo no celular (iOS/Android/PWA) e sem faixa clara no overscroll. */
+  html {
+    background-color: var(--color-bg);
+    overscroll-behavior: none;
+  }
   body {
+    overscroll-behavior: none;
+    overflow-x: clip;
     @apply bg-bg text-ink font-sans antialiased;
     font-feature-settings: "tnum" 1;
   }
