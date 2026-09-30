@@ -1,4 +1,7 @@
 begin;
+-- independente das contas locais: tudo é desfeito pelo rollback no fim
+truncate public.profiles cascade;
+delete from auth.users;
 select plan(10);
 
 insert into auth.users (id, email) values

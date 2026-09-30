@@ -1,4 +1,7 @@
 begin;
+-- independente das contas locais: tudo é desfeito pelo rollback no fim
+truncate public.profiles cascade;
+delete from auth.users;
 select plan(8);
 
 -- 29/09 às 23:59 SP = 30/09 02:59Z
