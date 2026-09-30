@@ -1,10 +1,11 @@
 import { Outlet } from 'react-router'
 import { BottomNav, PixelIcon } from '@/design/ui'
 
-// E5 acrescenta "Simulados" e E6 acrescenta "Caderno".
+// E6 acrescenta "Caderno".
 const NAV = [
   { to: '/', label: 'Hoje', icon: <PixelIcon name="today" /> },
   { to: '/trilha', label: 'Trilha', icon: <PixelIcon name="trail" /> },
+  { to: '/simulados', label: 'Simulados', icon: <PixelIcon name="reels" /> },
 ]
 
 export function AppShell() {

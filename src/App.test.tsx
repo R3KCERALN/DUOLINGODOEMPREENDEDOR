@@ -24,3 +24,11 @@ test('rotas da trilha exigem login', async () => {
   render(<MemoryRouter initialEntries={['/trilha/w01']}><AuthProvider><AppRoutes /></AuthProvider></MemoryRouter>)
   expect(await screen.findByRole('heading', { name: 'Entrar' })).toBeInTheDocument()
 })
+
+test('rotas de simulados e de cenários exigem login', async () => {
+  for (const path of ['/simulados', '/simulados/abc', '/cenarios']) {
+    const { unmount } = render(<MemoryRouter initialEntries={[path]}><AuthProvider><AppRoutes /></AuthProvider></MemoryRouter>)
+    expect(await screen.findByRole('heading', { name: 'Entrar' })).toBeInTheDocument()
+    unmount()
+  }
+})

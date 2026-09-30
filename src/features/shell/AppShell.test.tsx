@@ -10,6 +10,7 @@ function renderAt(path: string) {
           <Route index element={<h1>Tela hoje</h1>} />
           <Route path="trilha" element={<h1>Tela trilha</h1>} />
           <Route path="trilha/:nodeId" element={<h1>Tela semana</h1>} />
+          <Route path="simulados/:id" element={<h1>Tela simulado</h1>} />
         </Route>
       </Routes>
     </MemoryRouter>,
@@ -28,4 +29,10 @@ test('aba Trilha continua ativa dentro de uma semana', () => {
   expect(screen.getByRole('heading', { name: 'Tela semana' })).toBeInTheDocument()
   expect(screen.getByRole('link', { name: 'Trilha' })).toHaveAttribute('aria-current', 'page')
   expect(screen.getByRole('link', { name: 'Hoje' })).not.toHaveAttribute('aria-current')
+})
+
+test('aba Simulados continua ativa dentro de um simulado', () => {
+  renderAt('/simulados/abc')
+  expect(screen.getByRole('link', { name: 'Simulados' })).toHaveAttribute('aria-current', 'page')
+  expect(screen.getByRole('link', { name: 'Trilha' })).not.toHaveAttribute('aria-current')
 })

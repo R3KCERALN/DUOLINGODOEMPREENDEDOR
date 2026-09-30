@@ -8,21 +8,31 @@ if (!/^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(url)) throw new Error(`E2E s�
 
 const admin = createClient(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } })
 
-/** E-mail da conta aluna local; cria uma conta de teste se ainda não existir. */
-export async function studentEmail(): Promise<string> {
-  const { data: existing, error } = await admin.from('profiles').select('id').eq('role', 'aluna').maybeSingle()
+async function accountEmail(role: 'aluna' | 'mentor', fallbackEmail: string, name: string): Promise<string> {
+  const { data: existing, error } = await admin.from('profiles').select('id').eq('role', role).maybeSingle()
   if (error) throw error
   if (existing) {
     const { data, error: userError } = await admin.auth.admin.getUserById(existing.id)
-    if (userError || !data.user.email) throw userError ?? new Error('Conta aluna sem e-mail')
+    if (userError || !data.user.email) throw userError ?? new Error(`Conta ${role} sem e-mail`)
     return data.user.email
   }
-  const email = 'aluna.e2e@trilha.test'
-  const { data, error: createError } = await admin.auth.admin.createUser({ email, email_confirm: true })
+  const { data, error: createError } = await admin.auth.admin.createUser({ email: fallbackEmail, email_confirm: true })
   if (createError) throw createError
-  const { error: profileError } = await admin.from('profiles').insert({ id: data.user.id, role: 'aluna', name: 'Aluna E2E' })
+  const { error: profileError } = await admin.from('profiles').insert({ id: data.user.id, role, name })
   if (profileError) throw profileError
-  return email
+  return fallbackEmail
+}
+
+/** E-mail da conta aluna local; cria uma conta de teste se ainda não existir. */
+export const studentEmail = () => accountEmail('aluna', 'aluna.e2e@trilha.test', 'Aluna E2E')
+
+/** E-mail da conta mentor local; cria uma conta de teste se ainda não existir. */
+export const mentorEmail = () => accountEmail('mentor', 'mentor.e2e@trilha.test', 'Mentor E2E')
+
+/** Apaga todos os simulados do banco local (fichas, cartas e gravações vão junto, por cascata). */
+export async function resetSimulations(): Promise<void> {
+  const r = await admin.from('simulations').delete().not('id', 'is', null)
+  if (r.error) throw r.error
 }
 
 /** Zera progresso e overrides do banco local. */
