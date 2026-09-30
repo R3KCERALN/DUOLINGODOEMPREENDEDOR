@@ -1,7 +1,7 @@
 export type Result = { data: unknown; error: unknown; count?: number | null }
 export interface Call { table: string; method: string; args: unknown[] }
 
-const BUILDER_METHODS = ['select', 'insert', 'update', 'upsert', 'delete', 'eq', 'neq', 'in', 'is', 'order', 'limit', 'textSearch', 'maybeSingle', 'single']
+const BUILDER_METHODS = ['select', 'insert', 'update', 'upsert', 'delete', 'eq', 'neq', 'in', 'is', 'order', 'limit', 'range', 'textSearch', 'maybeSingle', 'single']
 
 /**
  * Supabase falso para testes de hooks. Cada `await` de uma consulta consome o próximo item de

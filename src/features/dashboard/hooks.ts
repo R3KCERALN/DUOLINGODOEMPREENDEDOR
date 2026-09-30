@@ -32,15 +32,24 @@ export function useScoreSeries() {
   })
 }
 
+const ACTIVITY_PAGE = 1000
+
 /** RF-94/99a: um registro por dia com atividade da aluna (fuso de São Paulo, calculado no banco). */
 export function useActivityDays() {
   return useQuery({
     queryKey: ['activity_days'],
     queryFn: async (): Promise<ActivityDay[]> => {
-      const { data, error } = await supabase.from('v_activity_days').select('day, items, simulations, journal').order('day', { ascending: true })
-      if (error) throw error
-      return (data as unknown as { day: string; items: Num; simulations: Num; journal: boolean }[])
-        .map((r) => ({ day: r.day, items: Number(r.items), simulations: Number(r.simulations), journal: r.journal }))
+      // O PostgREST devolve no máximo 1000 linhas por consulta: pagina por `day` (único na view) até vir uma página incompleta.
+      const rows: { day: string; items: Num; simulations: Num; journal: boolean }[] = []
+      for (let from = 0; ; from += ACTIVITY_PAGE) {
+        const { data, error } = await supabase.from('v_activity_days').select('day, items, simulations, journal')
+          .order('day', { ascending: true }).range(from, from + ACTIVITY_PAGE - 1)
+        if (error) throw error
+        const page = data as unknown as typeof rows
+        rows.push(...page)
+        if (page.length < ACTIVITY_PAGE) break
+      }
+      return rows.map((r) => ({ day: r.day, items: Number(r.items), simulations: Number(r.simulations), journal: r.journal }))
     },
   })
 }

@@ -60,6 +60,37 @@ test('useActivityDays devolve os dias em ordem, com números de verdade', async 
   expect(calls).toContainEqual({ table: 'v_activity_days', method: 'order', args: ['day', { ascending: true }] })
 })
 
+test('useActivityDays pagina além do limite de 1000 linhas do PostgREST', async () => {
+  const day = (i: number) => ({ day: `d${String(i).padStart(4, '0')}`, items: 1, simulations: 0, journal: false })
+  results.v_activity_days = [
+    { data: Array.from({ length: 1000 }, (_, i) => day(i)), error: null },
+    { data: Array.from({ length: 3 }, (_, i) => day(1000 + i)), error: null },
+  ]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useActivityDays(), { wrapper: Wrapper })
+  await waitFor(() => expect(result.current.data).toHaveLength(1003))
+  expect(result.current.data![1002].day).toBe('d1002')
+  expect(calls.filter((c) => c.method === 'range').map((c) => c.args)).toEqual([[0, 999], [1000, 1999]])
+})
+
+test('useActivityDays: página cheia seguida de página vazia termina sem repetir', async () => {
+  results.v_activity_days = [
+    { data: Array.from({ length: 1000 }, (_, i) => ({ day: `d${i}`, items: 1, simulations: 0, journal: false })), error: null },
+    { data: [], error: null },
+  ]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useActivityDays(), { wrapper: Wrapper })
+  await waitFor(() => expect(result.current.data).toHaveLength(1000))
+  expect(calls.filter((c) => c.method === 'range')).toHaveLength(2)
+})
+
+test('useActivityDays repassa o erro de uma página', async () => {
+  results.v_activity_days = [{ data: null, error: { message: 'boom', code: 'XX000' } }]
+  const { Wrapper } = setup()
+  const { result } = renderHook(() => useActivityDays(), { wrapper: Wrapper })
+  await waitFor(() => expect(result.current.isError).toBe(true))
+})
+
 test('useStorageUsage lê a RPC e ignora bucket desconhecido', async () => {
   results['rpc:storage_usage'] = [{ data: [
     { bucket: 'books', bytes: '1500', files: 2 },
