@@ -1,7 +1,9 @@
 import { Link } from 'react-router'
 import { Badge, Card, Checkbox, ProgressBar } from '@/design/ui'
+import { yesterdayNotice } from '@/domain/journalDays'
 import { dailyRoutine, routineItemId, type RoutineItem } from '@/domain/routine'
 import { currentStreak } from '@/domain/streak'
+import { useAuth } from '@/features/auth/AuthProvider'
 import { useJournalDays, useNodeStates, useProgress, useToggleItem } from '@/features/progress/hooks'
 import { spDate, TZ } from '@/lib/dates'
 
@@ -15,6 +17,7 @@ export function TodayScreen() {
   const progress = useProgress()
   const journal = useJournalDays()
   const toggle = useToggleItem()
+  const { session } = useAuth()
 
   if (trail.isLoading || progress.isLoading || journal.isLoading) {
     return <p role="status" className="p-6 text-muted">Carregando o seu dia…</p>
@@ -30,6 +33,10 @@ export function TodayScreen() {
   const isDone = (i: RoutineItem) => (i.key === 'caderno' ? journalDone : doneItems.has(routineItemId(today, i.key)))
   const doneCount = items.filter(isDone).length
   const streak = currentStreak(journalDays, today)
+  // Primeiro dia de uso = dia (em SP) em que a conta foi confirmada; antes dele não havia caderno esperado.
+  const user = session?.user
+  const since = user?.email_confirmed_at ?? user?.created_at
+  const notice = yesterdayNotice(journalDays, now, since ? spDate(new Date(since)) : today)
   const next = trail.data.next
 
   return (
@@ -49,6 +56,13 @@ export function TodayScreen() {
           {streak === 0 ? 'Sequência começa hoje' : `${streak} ${streak === 1 ? 'dia seguido' : 'dias seguidos'}`}
         </Badge>
       </header>
+
+      {notice && (
+        <p role="status" className="rounded-card border-2 border-streak p-3 font-bold text-streak">
+          {notice.kind === 'missing' ? 'O caderno de ontem ficou em falta.' : 'O caderno de ontem ainda pode ser preenchido até 12:00.'}{' '}
+          <Link to={`/caderno/dia/${notice.date}`} className="underline underline-offset-4">{notice.kind === 'missing' ? 'Ver o dia' : 'Preencher agora'}</Link>
+        </p>
+      )}
 
       <Card>
         {next ? (

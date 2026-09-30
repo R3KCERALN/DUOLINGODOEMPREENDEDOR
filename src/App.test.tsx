@@ -32,3 +32,11 @@ test('rotas de simulados e de cenários exigem login', async () => {
     unmount()
   }
 })
+
+test('rotas do caderno e da biblioteca exigem login', async () => {
+  for (const path of ['/caderno', '/caderno/notas/nova', '/caderno/checklists', '/biblioteca', '/biblioteca/carnegie']) {
+    const { unmount } = render(<MemoryRouter initialEntries={[path]}><AuthProvider><AppRoutes /></AuthProvider></MemoryRouter>)
+    expect(await screen.findByRole('heading', { name: 'Entrar' })).toBeInTheDocument()
+    unmount()
+  }
+})

@@ -4,16 +4,19 @@ import { MemoryRouter } from 'react-router'
 import { NODES } from '@/content/trail'
 import { mutationOf, nodeStatesOf, progressOf, queryOf } from '@/test/progressMocks'
 
+vi.mock('@/features/auth/AuthProvider', () => ({ useAuth: vi.fn() }))
 vi.mock('@/features/progress/hooks', () => ({
   useNodeStates: vi.fn(), useProgress: vi.fn(), useJournalDays: vi.fn(), useToggleItem: vi.fn(),
 }))
 
+import { useAuth } from '@/features/auth/AuthProvider'
 import { useJournalDays, useNodeStates, useProgress, useToggleItem } from '@/features/progress/hooks'
 import { TodayScreen } from './TodayScreen'
 
 const toggle = vi.fn()
 
-function setup({ done = [] as string[], journal = [] as string[] } = {}) {
+function setup({ done = [] as string[], journal = [] as string[], since = '2026-09-01T12:00:00Z' } = {}) {
+  vi.mocked(useAuth).mockReturnValue({ session: { user: { created_at: since, email_confirmed_at: since } } } as never)
   vi.mocked(useNodeStates).mockReturnValue(nodeStatesOf(done))
   vi.mocked(useProgress).mockReturnValue(progressOf(done))
   vi.mocked(useJournalDays).mockReturnValue(queryOf<ReadonlySet<string>>(new Set(journal)))
@@ -90,4 +93,32 @@ test('na Fase 2 o desafio vira abordagem real com a regra 70/30', () => {
   setup({ done: [...f1, 'f1.gate.2', 'f1.gate.3', 'f1.gate.4', 'f1.gate.5'] })
   expect(screen.getByRole('checkbox', { name: '1 abordagem real (10 min)' })).toBeInTheDocument()
   expect(screen.getAllByText(/Regra 70\/30/)).toHaveLength(2)
+})
+
+test('caderno de ontem em falta gera aviso com link para o dia (RF-50)', () => {
+  setup({ journal: ['2026-09-27'] })
+  expect(screen.getByRole('status')).toHaveTextContent('O caderno de ontem ficou em falta.')
+  expect(screen.getByRole('link', { name: 'Ver o dia' })).toHaveAttribute('href', '/caderno/dia/2026-09-28')
+})
+
+test('antes do meio-dia o aviso convida a preencher ontem', () => {
+  vi.setSystemTime(new Date('2026-09-29T14:59:00Z')) // 11:59 em SP
+  setup({ journal: ['2026-09-27'] })
+  expect(screen.getByRole('status')).toHaveTextContent('ainda pode ser preenchido até 12:00')
+  expect(screen.getByRole('link', { name: 'Preencher agora' })).toBeInTheDocument()
+})
+
+test('caderno de ontem completo: sem aviso', () => {
+  setup({ journal: ['2026-09-28'] })
+  expect(screen.queryByRole('status')).not.toBeInTheDocument()
+})
+
+test('primeiro dia de uso: ontem ainda não tinha caderno esperado, sem aviso', () => {
+  setup({ since: '2026-09-29T11:00:00Z' }) // conta confirmada hoje, 08:00 em SP
+  expect(screen.queryByRole('status')).not.toBeInTheDocument()
+})
+
+test('conta confirmada ontem à noite em SP (já dia 29 em UTC): ontem conta como dia de caderno', () => {
+  setup({ since: '2026-09-29T01:30:00Z' }) // 28/09, 22:30 em SP
+  expect(screen.getByRole('status')).toHaveTextContent('O caderno de ontem ficou em falta.')
 })

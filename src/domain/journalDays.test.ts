@@ -38,3 +38,9 @@ test('aviso de ontem na tela Hoje', () => {
   expect(yesterdayNotice(new Set(), NOON_MINUS)).toEqual({ kind: 'late_window', date: '2026-09-29' })
   expect(yesterdayNotice(new Set(['2026-09-29']), NOON)).toBeNull()
 })
+
+test('primeiro dia de uso: ontem ainda não era dia de caderno, então não há aviso', () => {
+  expect(yesterdayNotice(new Set(), NOON, '2026-09-30')).toBeNull()
+  expect(yesterdayNotice(new Set(), NOON_MINUS, '2026-09-30')).toBeNull()
+  expect(yesterdayNotice(new Set(), NOON, '2026-09-29')).toEqual({ kind: 'missing', date: '2026-09-29' })
+})

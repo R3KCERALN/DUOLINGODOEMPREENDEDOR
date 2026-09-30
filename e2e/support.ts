@@ -44,6 +44,12 @@ export async function resetProgress(): Promise<void> {
 }
 
 /** Login por magic link gerado pelo admin (sem abrir e-mail). */
+/** Apaga todas as entradas do caderno do banco local. */
+export async function resetJournal(): Promise<void> {
+  const r = await admin.from('journal_entries').delete().not('id', 'is', null)
+  if (r.error) throw r.error
+}
+
 export async function signIn(page: Page, email: string): Promise<void> {
   const { data, error } = await admin.auth.admin.generateLink({
     type: 'magiclink', email, options: { redirectTo: 'http://localhost:5173/' },

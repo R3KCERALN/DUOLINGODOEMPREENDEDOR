@@ -26,9 +26,15 @@ export function lastDays(today: string, n: number): string[] {
   return Array.from({ length: n }, (_, i) => addDays(today, -i))
 }
 
-/** Aviso da tela Hoje: o caderno de ontem em falta (ou ainda dentro do prazo até 12:00). */
-export function yesterdayNotice(completeDates: ReadonlySet<string>, now: Date): { kind: 'missing' | 'late_window'; date: string } | null {
+/**
+ * Aviso da tela Hoje: o caderno de ontem em falta (ou ainda dentro do prazo até 12:00).
+ * `startDate` é o primeiro dia de uso: antes dele não havia caderno esperado, então não há aviso.
+ */
+export function yesterdayNotice(
+  completeDates: ReadonlySet<string>, now: Date, startDate?: string,
+): { kind: 'missing' | 'late_window'; date: string } | null {
   const date = addDays(spDate(now), -1)
+  if (startDate !== undefined && date < startDate) return null
   const status = journalDayStatus(date, now, completeDates.has(date) ? { complete: true, late: false } : undefined)
   return status === 'missing' || status === 'late_window' ? { kind: status, date } : null
 }

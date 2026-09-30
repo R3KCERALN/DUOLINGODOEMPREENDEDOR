@@ -11,6 +11,7 @@ function renderAt(path: string) {
           <Route path="trilha" element={<h1>Tela trilha</h1>} />
           <Route path="trilha/:nodeId" element={<h1>Tela semana</h1>} />
           <Route path="simulados/:id" element={<h1>Tela simulado</h1>} />
+          <Route path="caderno/notas" element={<h1>Tela notas</h1>} />
         </Route>
       </Routes>
     </MemoryRouter>,
@@ -35,4 +36,10 @@ test('aba Simulados continua ativa dentro de um simulado', () => {
   renderAt('/simulados/abc')
   expect(screen.getByRole('link', { name: 'Simulados' })).toHaveAttribute('aria-current', 'page')
   expect(screen.getByRole('link', { name: 'Trilha' })).not.toHaveAttribute('aria-current')
+})
+
+test('aba Caderno continua ativa dentro das notas', () => {
+  renderAt('/caderno/notas')
+  expect(screen.getByRole('link', { name: 'Caderno' })).toHaveAttribute('aria-current', 'page')
+  expect(screen.getByRole('link', { name: 'Simulados' })).not.toHaveAttribute('aria-current')
 })
