@@ -17,7 +17,7 @@ export function NotesScreen() {
       <div className="flex flex-wrap items-end gap-3">
         <label className="flex min-w-0 flex-1 flex-col gap-1 font-bold">Buscar nas notas
           <input type="search" value={search} onChange={(e) => setSearch(e.target.value)}
-            className="h-12 rounded-control border-2 border-line bg-surface px-3 font-normal focus:border-brand focus:outline-none" />
+            className="h-12 rounded-control border-2 border-line bg-surface px-3 font-normal focus:border-brand" />
         </label>
         <Link to="/caderno/notas/nova" className="inline-flex h-12 items-center rounded-control bg-brand px-5 font-bold text-on-brand">Nova nota</Link>
       </div>

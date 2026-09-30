@@ -6,7 +6,7 @@ import { useSaveChecklist } from './hooks'
 import type { Checklist } from './types'
 
 const WEEKS = NODES.filter((n) => n.week !== undefined)
-const inputClass = 'h-12 rounded-control border-2 border-line bg-surface px-3 font-normal focus:border-brand focus:outline-none'
+const inputClass = 'h-12 rounded-control border-2 border-line bg-surface px-3 font-normal focus:border-brand'
 
 /** Cria ou edita uma lista (RF-42): título, itens, semana e data opcionais. Os ids nascem aqui, então salvar de novo é seguro. */
 export function ChecklistEditor({ initial, onDone }: { initial?: Checklist; onDone(): void }) {

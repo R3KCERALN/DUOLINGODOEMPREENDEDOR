@@ -13,7 +13,7 @@ export function TextArea({ label, value, onChange, minChars, disabled }: Props) 
         aria-invalid={invalid} aria-describedby={minChars ? `${id}-count` : undefined}
         onChange={(e) => onChange(e.target.value)}
         className="rounded-control border-2 border-line bg-bg p-3 leading-relaxed text-ink caret-brand
-          focus:border-brand focus:outline-none focus:glow disabled:opacity-60" />
+          focus:border-brand focus:glow disabled:opacity-60" />
       {minChars !== undefined && (
         <span id={`${id}-count`} className={`self-end text-sm tabular-nums ${invalid ? 'text-muted' : 'text-success font-bold'}`}>
           {Math.min(count, minChars)}/{minChars}

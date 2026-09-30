@@ -41,7 +41,7 @@ function NoteForm({ id, initial, link }: { id: string; initial: Note | null; lin
         <>
           <label className="flex flex-col gap-1 font-bold">Título
             <input value={draft.title} onChange={(e) => setDraft((d) => ({ ...d, title: e.target.value }))} maxLength={200}
-              className="h-12 rounded-control border-2 border-line bg-surface px-3 font-normal focus:border-brand focus:outline-none" />
+              className="h-12 rounded-control border-2 border-line bg-surface px-3 font-normal focus:border-brand" />
           </label>
           {preview
             ? <section aria-label="Pré-visualização"><Markdown source={draft.body} /></section>

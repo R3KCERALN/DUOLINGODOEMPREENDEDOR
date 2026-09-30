@@ -115,6 +115,14 @@
   animation: lamp 1.6s ease-in-out infinite;
 }
 
+/* RNF-06: foco visível para todo elemento interativo. Componentes com focus-visible:outline-* próprios (utilities) continuam valendo. */
+@layer base {
+  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 3px solid var(--color-ink);
+    outline-offset: 2px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 1ms !important;

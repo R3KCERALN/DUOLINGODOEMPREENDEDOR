@@ -89,7 +89,7 @@ export function SimulationsHome() {
           <label className="flex flex-col gap-1 font-bold">
             Dificuldade
             <select value={level} onChange={(e) => setChosen(e.target.value as Difficulty)} disabled={busy}
-              className="h-12 rounded-control border-2 border-line bg-bg px-3 font-normal focus:border-brand focus:outline-none focus:glow">
+              className="h-12 rounded-control border-2 border-line bg-bg px-3 font-normal focus:border-brand focus:glow">
               {LEVELS.map((l) => <option key={l} value={l}>{DIFFICULTY_LABEL[l]}</option>)}
             </select>
           </label>

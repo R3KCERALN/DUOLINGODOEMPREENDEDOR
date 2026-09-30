@@ -69,7 +69,7 @@ export function PdfReader({ url, initialPage, onPageChange }: PdfReaderProps) {
           <input type="number" min={1} max={total ?? undefined} value={typed ?? String(page)}
             onChange={(e) => setTyped(e.target.value)} onBlur={commitTyped}
             onKeyDown={(e) => { if (e.key === 'Enter') commitTyped() }}
-            className="h-9 w-20 rounded-control border-2 border-line bg-surface px-2 tabular-nums focus:border-brand focus:outline-none" />
+            className="h-9 w-20 rounded-control border-2 border-line bg-surface px-2 tabular-nums focus:border-brand" />
         </label>
         <span aria-live="polite" className="text-sm text-muted">de {total ?? '…'}</span>
         <Button size="sm" variant="secondary" disabled={total === null || page >= total} onClick={() => go(page + 1)}>Próxima página</Button>

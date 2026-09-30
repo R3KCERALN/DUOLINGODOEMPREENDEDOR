@@ -37,7 +37,7 @@ export function LoginScreen() {
               <label className="flex flex-col gap-1.5 font-bold">
                 E-mail
                 <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)}
-                  className="h-12 rounded-control border-2 border-line bg-bg px-3 font-normal text-ink caret-brand focus:border-brand focus:outline-none focus:glow" />
+                  className="h-12 rounded-control border-2 border-line bg-bg px-3 font-normal text-ink caret-brand focus:border-brand focus:glow" />
               </label>
               <Button type="submit" size="lg" loading={status === 'sending'}>Enviar link</Button>
               {status === 'error' && <p role="alert" className="text-danger">Não foi possível enviar. Esse e-mail tem acesso?</p>}

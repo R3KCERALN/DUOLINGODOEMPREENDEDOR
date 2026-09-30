@@ -11,7 +11,8 @@ export function ChartFrame({ title, summary, table, children }: { title: string;
       <Card className="flex flex-col gap-3">
         <h2 id={id} className="text-lg font-bold">{title}</h2>
         <p className="text-sm text-muted">{summary}</p>
-        {children && <div aria-hidden className="h-60 w-full">{children}</div>}
+        {/* inert: o Recharts deixa o SVG focável, e nada focável pode ficar sob aria-hidden. */}
+        {children && <div aria-hidden inert className="h-60 w-full">{children}</div>}
         {table && (
           <details className="text-sm">
             <summary className="w-fit cursor-pointer font-bold text-brand underline underline-offset-4">Ver os dados em tabela</summary>

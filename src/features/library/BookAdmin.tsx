@@ -42,7 +42,7 @@ export function BookAdmin({ book }: { book: Book }) {
       <form className="flex flex-col gap-2" onSubmit={(e) => { e.preventDefault(); saveLink.mutate({ bookId: book.id, externalUrl: link }) }}>
         <label className="flex flex-col gap-1 font-bold">Link externo (compra ou audiolivro)
           <input value={link} onChange={(e) => setLink(e.target.value)} placeholder="https://"
-            className="h-12 rounded-control border-2 border-line bg-surface px-3 font-normal focus:border-brand focus:outline-none" />
+            className="h-12 rounded-control border-2 border-line bg-surface px-3 font-normal focus:border-brand" />
         </label>
         <Button type="submit" size="sm" variant="secondary" loading={saveLink.isPending}>Salvar link</Button>
         {saveLink.error && <p role="alert" className="text-danger">{saveLink.error.message}</p>}

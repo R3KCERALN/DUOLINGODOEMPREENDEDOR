@@ -22,3 +22,8 @@ test('com gráfico e tabela: o gráfico fica escondido dos leitores de tela e os
   expect(screen.getByRole('columnheader', { name: 'Média' })).toBeInTheDocument()
   expect(screen.getByRole('row', { name: /28\/09.*18,5/ })).toBeInTheDocument()
 })
+
+test('o gráfico decorativo fica fora do Tab: o Recharts deixa o SVG focável e ele está sob aria-hidden (axe aria-hidden-focus)', () => {
+  const { container } = render(<ChartFrame title="T" summary="S"><svg tabIndex={0} /></ChartFrame>)
+  expect(container.querySelector('[aria-hidden="true"]')).toHaveAttribute('inert')
+})

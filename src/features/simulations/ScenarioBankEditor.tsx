@@ -12,7 +12,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: 4, label: 'Complicação' }, { key: 'cards', label: 'Perguntas do produto' },
 ]
 
-const inputClass = 'h-12 rounded-control border-2 border-line bg-surface px-3 font-normal focus:border-brand focus:outline-none'
+const inputClass = 'h-12 rounded-control border-2 border-line bg-surface px-3 font-normal focus:border-brand'
 
 function ReelTab({ reel, items }: { reel: ReelNumber; items: BankItem[] }) {
   const save = useSaveReelItem()
