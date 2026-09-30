@@ -11,8 +11,8 @@ insert into public.profiles values
   ('00000000-0000-0000-0000-00000000000a', 'aluna', 'Aluna'),
   ('00000000-0000-0000-0000-00000000000b', 'mentor', 'Mentor');
 
-insert into public.simulations (id, mode, difficulty, phase, created_by)
-values ('11111111-1111-1111-1111-111111111111', 'surpresa', 'medio', 'f2', '00000000-0000-0000-0000-00000000000b');
+insert into public.simulations (id, mode, difficulty, phase, status, created_by)
+values ('11111111-1111-1111-1111-111111111111', 'surpresa', 'medio', 'f2', 'aguardando_notas', '00000000-0000-0000-0000-00000000000b');
 insert into public.simulation_scenarios values ('11111111-1111-1111-1111-111111111111', 'obj-06', 'prof-01', 'prod-01', '{comp-01}');
 insert into public.notes (author, title, private) values
   ('00000000-0000-0000-0000-00000000000a', 'segredo', true),
