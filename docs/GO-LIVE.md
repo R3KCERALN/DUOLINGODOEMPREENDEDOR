@@ -11,7 +11,7 @@ Roteiro para colocar o app em produção. Marque cada caixa. **[você]** = passo
 ## 2. Banco de produção [dev]
 
 - [ ] `npx supabase login` e `npx supabase link --project-ref <ref>` (o `<ref>` está na URL do painel do projeto).
-- [ ] `npx supabase db push` — aplica todas as migrations, inclusive `pg_cron`, `pg_net`, a retenção e o endurecimento de segurança.
+- [ ] `npx supabase db push --include-seed` — aplica todas as migrations (inclusive `pg_cron`, `pg_net`, a retenção e o endurecimento de segurança) e carrega o seed de conteúdo (cenários da roleta, cartas e lista de livros; sem usuários).
 - [ ] Painel → Database → Extensions: `pg_cron` e `pg_net` aparecem ativas.
 - [ ] Painel → Storage: buckets `books` e `recordings` existem e estão **privados**.
 
