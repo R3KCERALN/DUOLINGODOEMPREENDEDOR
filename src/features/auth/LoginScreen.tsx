@@ -1,14 +1,36 @@
 import { useState, type FormEvent } from 'react'
+import { useNavigate } from 'react-router'
 import { supabase } from '@/lib/supabase'
 import { Button } from '@/design/ui'
 
+type Mode = 'password' | 'link'
+type Status = 'idle' | 'sending' | 'sent' | 'error'
+
+const inputClass =
+  'h-12 rounded-control border-2 border-line bg-bg px-3 font-normal text-ink caret-brand focus:border-brand focus:glow'
+
 export function LoginScreen() {
+  const navigate = useNavigate()
+  const [mode, setMode] = useState<Mode>('password')
   const [email, setEmail] = useState('')
-  const [status, setStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle')
+  const [password, setPassword] = useState('')
+  const [status, setStatus] = useState<Status>('idle')
+
+  function switchMode(next: Mode) {
+    setMode(next)
+    setStatus('idle')
+  }
 
   async function submit(e: FormEvent) {
     e.preventDefault()
     setStatus('sending')
+    if (mode === 'password') {
+      const { error } = await supabase.auth.signInWithPassword({ email, password })
+      if (error) return setStatus('error')
+      setStatus('idle')
+      navigate('/', { replace: true })
+      return
+    }
     const { error } = await supabase.auth.signInWithOtp({
       email,
       options: { shouldCreateUser: false, emailRedirectTo: window.location.origin },
@@ -36,11 +58,28 @@ export function LoginScreen() {
             <form onSubmit={submit} className="flex flex-col gap-4">
               <label className="flex flex-col gap-1.5 font-bold">
                 E-mail
-                <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)}
-                  className="h-12 rounded-control border-2 border-line bg-bg px-3 font-normal text-ink caret-brand focus:border-brand focus:glow" />
+                <input type="email" required autoComplete="email" value={email}
+                  onChange={(e) => setEmail(e.target.value)} className={inputClass} />
               </label>
-              <Button type="submit" size="lg" loading={status === 'sending'}>Enviar link</Button>
-              {status === 'error' && <p role="alert" className="text-danger">Não foi possível enviar. Esse e-mail tem acesso?</p>}
+              {mode === 'password' && (
+                <label className="flex flex-col gap-1.5 font-bold">
+                  Senha
+                  <input type="password" required autoComplete="current-password" value={password}
+                    onChange={(e) => setPassword(e.target.value)} className={inputClass} />
+                </label>
+              )}
+              <Button type="submit" size="lg" loading={status === 'sending'}>
+                {mode === 'password' ? 'Entrar' : 'Enviar link'}
+              </Button>
+              {status === 'error' && (
+                <p role="alert" className="text-danger">
+                  {mode === 'password' ? 'E-mail ou senha incorretos.' : 'Não foi possível enviar. Esse e-mail tem acesso?'}
+                </p>
+              )}
+              <Button type="button" variant="ghost" size="sm"
+                onClick={() => switchMode(mode === 'password' ? 'link' : 'password')}>
+                {mode === 'password' ? 'Entrar com link no e-mail' : 'Entrar com senha'}
+              </Button>
             </form>
           )}
         </div>

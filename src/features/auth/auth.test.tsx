@@ -2,8 +2,9 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Routes, Route } from 'react-router'
 
-const { signInWithOtp, getSession, from } = vi.hoisted(() => ({
+const { signInWithOtp, signInWithPassword, getSession, from } = vi.hoisted(() => ({
   signInWithOtp: vi.fn().mockResolvedValue({ error: null }),
+  signInWithPassword: vi.fn().mockResolvedValue({ error: null }),
   getSession: vi.fn().mockResolvedValue({ data: { session: null } }),
   from: vi.fn(),
 }))
@@ -11,6 +12,7 @@ vi.mock('@/lib/supabase', () => ({
   supabase: {
     auth: {
       signInWithOtp,
+      signInWithPassword,
       getSession,
       onAuthStateChange: vi.fn(() => ({ data: { subscription: { unsubscribe: vi.fn() } } })),
       signOut: vi.fn(),
@@ -23,8 +25,36 @@ import { AuthProvider } from './AuthProvider'
 import { RequireAuth } from './RequireAuth'
 import { LoginScreen } from './LoginScreen'
 
+test('entra com e-mail e senha e vai para o início', async () => {
+  render(
+    <MemoryRouter initialEntries={['/login']}>
+      <AuthProvider>
+        <Routes>
+          <Route path="/login" element={<LoginScreen />} />
+          <Route path="/" element={<p>início</p>} />
+        </Routes>
+      </AuthProvider>
+    </MemoryRouter>,
+  )
+  await userEvent.type(screen.getByLabelText(/e-mail/i), 'ela@exemplo.com')
+  await userEvent.type(screen.getByLabelText(/senha/i), 'segredo123')
+  await userEvent.click(screen.getByRole('button', { name: /^entrar$/i }))
+  expect(signInWithPassword).toHaveBeenCalledWith({ email: 'ela@exemplo.com', password: 'segredo123' })
+  expect(await screen.findByText('início')).toBeInTheDocument()
+})
+
+test('senha errada mostra erro e fica no login', async () => {
+  signInWithPassword.mockResolvedValueOnce({ error: new Error('Invalid login credentials') })
+  render(<MemoryRouter><AuthProvider><LoginScreen /></AuthProvider></MemoryRouter>)
+  await userEvent.type(screen.getByLabelText(/e-mail/i), 'ela@exemplo.com')
+  await userEvent.type(screen.getByLabelText(/senha/i), 'errada')
+  await userEvent.click(screen.getByRole('button', { name: /^entrar$/i }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('E-mail ou senha incorretos')
+})
+
 test('envia magic link sem criar usuário', async () => {
   render(<MemoryRouter><AuthProvider><LoginScreen /></AuthProvider></MemoryRouter>)
+  await userEvent.click(screen.getByRole('button', { name: /link no e-mail/i }))
   await userEvent.type(screen.getByLabelText(/e-mail/i), 'ela@exemplo.com')
   await userEvent.click(screen.getByRole('button', { name: /enviar link/i }))
   expect(signInWithOtp).toHaveBeenCalledWith({
